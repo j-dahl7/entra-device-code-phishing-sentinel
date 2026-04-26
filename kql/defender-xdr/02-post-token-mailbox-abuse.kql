@@ -1,0 +1,36 @@
+let Window = 60m;
+let DeviceCodeInterrupts =
+    EntraIdSignInEvents
+    | where Timestamp > ago(24h)
+    | where ErrorCode == 50199
+    | project AccountUpn = tolower(AccountUpn), SessionId,
+        InterruptTime = Timestamp;
+let DeviceCodeSuccesses =
+    EntraIdSignInEvents
+    | where Timestamp > ago(24h)
+    | where ErrorCode == 0
+    | project AccountUpn = tolower(AccountUpn), SessionId,
+        DeviceCodeTime = Timestamp, SignInIP = IPAddress, Application;
+let SuspiciousDeviceCodeSessions =
+    DeviceCodeInterrupts
+    | join kind=inner DeviceCodeSuccesses on AccountUpn, SessionId
+    | where DeviceCodeTime between (InterruptTime .. InterruptTime + 5m)
+    | summarize DeviceCodeTime=max(DeviceCodeTime),
+        FirstInterrupt=min(InterruptTime),
+        SignInIPs=make_set(SignInIP, 10),
+        Apps=make_set(Application, 10)
+        by AccountUpn, SessionId;
+CloudAppEvents
+| where Timestamp > ago(24h)
+| where ApplicationId == 20893 or Application == "Microsoft Exchange Online"
+| where ActionType in (
+    "New-InboxRule", "Set-InboxRule", "Enable-InboxRule",
+    "Set-Mailbox", "New-TransportRule", "Set-TransportRule",
+    "UpdateInboxRules", "MailItemsAccessed"
+)
+| extend AccountUpn = tolower(AccountId)
+| join kind=inner SuspiciousDeviceCodeSessions on AccountUpn
+| where Timestamp between (DeviceCodeTime .. DeviceCodeTime + Window)
+| project Timestamp, DeviceCodeTime, FirstInterrupt, AccountUpn, SessionId,
+    ActionType, IPAddress, UserAgent, RawEventData
+| order by Timestamp desc

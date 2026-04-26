@@ -1,0 +1,39 @@
+let Lookback = 15m;
+let Window = 5m;
+let ApprovedDeviceCodeApps = dynamic([
+    "Microsoft Azure CLI",
+    "Azure CLI",
+    "Microsoft Azure PowerShell",
+    "Microsoft Teams Rooms"
+]);
+let ApprovedDeviceCodeAppIds = dynamic([
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46", // Microsoft Azure CLI
+    "1950a258-227b-4e31-a9cf-717495945fc2"  // Microsoft Azure PowerShell
+]);
+let Interrupts =
+    SigninLogs
+    | where TimeGenerated > ago(Lookback)
+    | extend Result = tostring(ResultType)
+    | where Result == "50199" or ResultDescription has "50199"
+    | extend SessionId = tostring(column_ifexists("SessionId", ""))
+    | project InterruptTime = TimeGenerated, UserPrincipalName,
+        CorrelationId, SessionId, IPAddress, AppDisplayName, AppId, UserAgent;
+let Successes =
+    SigninLogs
+    | where TimeGenerated > ago(Lookback)
+    | extend Result = tostring(ResultType)
+    | where Result == "0"
+    | extend SessionId = tostring(column_ifexists("SessionId", ""))
+    | project SuccessTime = TimeGenerated, UserPrincipalName,
+        CorrelationId, SessionId, SuccessIP = IPAddress,
+        SuccessApp = AppDisplayName, SuccessAppId = AppId, SuccessUserAgent = UserAgent;
+Interrupts
+| join kind=inner Successes on UserPrincipalName, CorrelationId
+| where SuccessTime between (InterruptTime .. InterruptTime + Window)
+| where AppDisplayName !in~ (ApprovedDeviceCodeApps)
+    and SuccessApp !in~ (ApprovedDeviceCodeApps)
+    and AppId !in~ (ApprovedDeviceCodeAppIds)
+    and SuccessAppId !in~ (ApprovedDeviceCodeAppIds)
+| project TimeGenerated = SuccessTime, InterruptTime, UserPrincipalName,
+    AppDisplayName, AppId, IPAddress, SuccessIP, UserAgent, SuccessUserAgent,
+    CorrelationId, SessionId

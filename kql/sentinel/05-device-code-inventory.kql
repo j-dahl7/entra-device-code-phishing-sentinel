@@ -1,0 +1,12 @@
+SigninLogs
+| where TimeGenerated > ago(30d)
+| extend AuthProtocol = tostring(column_ifexists("AuthenticationProtocol", ""))
+| extend Result = tostring(ResultType)
+| where AuthProtocol =~ "deviceCode"
+    or ResultDescription has "device code"
+    or Result == "50199"
+| summarize Events=count(), Users=dcount(UserPrincipalName), IPs=dcount(IPAddress),
+    FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
+    SampleUsers=make_set(UserPrincipalName, 10), SampleIPs=make_set(IPAddress, 10)
+    by AppDisplayName, AppId
+| order by Events desc

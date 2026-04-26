@@ -1,0 +1,38 @@
+let SigninLogs = datatable(TimeGenerated:datetime, UserPrincipalName:string, ResultType:string, ResultDescription:string, CorrelationId:string, SessionId:string, IPAddress:string, AppDisplayName:string, AppId:string, UserAgent:string, AuthenticationProtocol:string)
+[
+    datetime(2026-04-25T14:00:00Z), "alex@contoso.com", "50199", "User is required to authorize device code", "corr-001", "sess-001", "203.0.113.50", "LAB - Nine Lives Device Code Telemetry", "21cac876-a276-44ce-826a-ea515333e546", "NineLivesLab/1.0", "deviceCode",
+    datetime(2026-04-25T14:03:12Z), "alex@contoso.com", "0", "Success", "corr-001", "sess-001", "203.0.113.50", "LAB - Nine Lives Device Code Telemetry", "21cac876-a276-44ce-826a-ea515333e546", "NineLivesLab/1.0", "deviceCode",
+    datetime(2026-04-25T14:45:22Z), "casey@contoso.com", "0", "Success", "corr-002", "sess-002", "198.51.100.8", "Microsoft Azure CLI", "04b07795-8ddb-461a-bbee-02f9e1bf7b46", "AzureCLI", "deviceCode"
+];
+let Window = 5m;
+let ApprovedDeviceCodeApps = dynamic([
+    "Microsoft Azure CLI",
+    "Azure CLI",
+    "Microsoft Azure PowerShell",
+    "Microsoft Teams Rooms"
+]);
+let ApprovedDeviceCodeAppIds = dynamic([
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+    "1950a258-227b-4e31-a9cf-717495945fc2"
+]);
+let Interrupts =
+    SigninLogs
+    | where ResultType == "50199" or ResultDescription has "50199"
+    | project InterruptTime = TimeGenerated, UserPrincipalName,
+        CorrelationId, SessionId, IPAddress, AppDisplayName, AppId, UserAgent;
+let Successes =
+    SigninLogs
+    | where ResultType == "0"
+    | project SuccessTime = TimeGenerated, UserPrincipalName,
+        CorrelationId, SessionId, SuccessIP = IPAddress,
+        SuccessApp = AppDisplayName, SuccessAppId = AppId, SuccessUserAgent = UserAgent;
+Interrupts
+| join kind=inner Successes on UserPrincipalName, CorrelationId
+| where SuccessTime between (InterruptTime .. InterruptTime + Window)
+| where AppDisplayName !in~ (ApprovedDeviceCodeApps)
+    and SuccessApp !in~ (ApprovedDeviceCodeApps)
+    and AppId !in~ (ApprovedDeviceCodeAppIds)
+    and SuccessAppId !in~ (ApprovedDeviceCodeAppIds)
+| project SuccessTime, InterruptTime, UserPrincipalName,
+    AppDisplayName, AppId, IPAddress, SuccessIP, UserAgent, SuccessUserAgent,
+    CorrelationId, SessionId

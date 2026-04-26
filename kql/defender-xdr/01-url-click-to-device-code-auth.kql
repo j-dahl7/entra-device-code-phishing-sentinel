@@ -1,0 +1,24 @@
+let Window = 7m;
+let SuspiciousClicks =
+    UrlClickEvents
+    | where Timestamp > ago(24h)
+    | extend ClickedThrough = tolower(tostring(IsClickedThrough)) in ("true", "1")
+    | where ActionType in ("ClickAllowed", "UrlScanInProgress", "UrlErrorPage")
+        or ClickedThrough
+        or UrlChain has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
+        or Url has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
+    | project ClickTime = Timestamp, AccountUpn = tolower(AccountUpn),
+        Url, UrlChain, NetworkMessageId, ActionType, ClickedThrough;
+let DeviceCodeSignins =
+    EntraIdSignInEvents
+    | where Timestamp > ago(24h)
+    | where ErrorCode in (0, 50199)
+    | summarize ErrorCodes=make_set(ErrorCode), FirstSignin=min(Timestamp), LastSignin=max(Timestamp),
+        IPs=make_set(IPAddress, 10), Apps=make_set(Application, 10), RiskLevels=make_set(RiskLevelAggregated, 10)
+        by AccountUpn=tolower(AccountUpn), SessionId
+    | where ErrorCodes has_all (0, 50199);
+SuspiciousClicks
+| join kind=inner DeviceCodeSignins on AccountUpn
+| where FirstSignin between (ClickTime .. ClickTime + Window)
+| project FirstSignin, ClickTime, AccountUpn, Url, UrlChain, ActionType, ClickedThrough,
+    ErrorCodes, IPs, Apps, RiskLevels, NetworkMessageId, SessionId

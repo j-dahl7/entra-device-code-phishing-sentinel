@@ -1,0 +1,46 @@
+let ApprovedDeviceCodeApps = dynamic([
+    "Microsoft Azure CLI",
+    "Azure CLI",
+    "Microsoft Azure PowerShell",
+    "Microsoft Teams Rooms"
+]);
+let ApprovedDeviceCodeAppIds = dynamic([
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46", // Microsoft Azure CLI
+    "1950a258-227b-4e31-a9cf-717495945fc2"  // Microsoft Azure PowerShell
+]);
+let Lookback = 1h;
+let Window = 5m;
+let DirectDeviceCodeEvents =
+    SigninLogs
+    | where TimeGenerated > ago(Lookback)
+    | extend AuthProtocol = tostring(column_ifexists("AuthenticationProtocol", ""))
+    | where AuthProtocol =~ "deviceCode" or ResultDescription has "device code"
+    | project TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName, AppId;
+let Interrupts =
+    SigninLogs
+    | where TimeGenerated > ago(Lookback)
+    | extend Result = tostring(ResultType)
+    | where Result == "50199" or ResultDescription has "50199"
+    | project InterruptTime = TimeGenerated, UserPrincipalName, CorrelationId;
+let CorrelatedSuccesses =
+    SigninLogs
+    | where TimeGenerated > ago(Lookback)
+    | extend Result = tostring(ResultType)
+    | where Result == "0"
+    | project SuccessTime = TimeGenerated, UserPrincipalName, CorrelationId,
+        IPAddress, AppDisplayName, AppId;
+let DeviceCodeLikeEvents =
+    Interrupts
+    | join kind=inner CorrelatedSuccesses on UserPrincipalName, CorrelationId
+    | where SuccessTime between (InterruptTime .. InterruptTime + Window)
+    | project TimeGenerated = SuccessTime, UserPrincipalName, IPAddress, AppDisplayName, AppId;
+union DirectDeviceCodeEvents, DeviceCodeLikeEvents
+| where AppDisplayName !in~ (ApprovedDeviceCodeApps)
+    and AppId !in~ (ApprovedDeviceCodeAppIds)
+| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
+    Attempts=count(), Users=dcount(UserPrincipalName), IPs=dcount(IPAddress),
+    SampleUsers=make_set(UserPrincipalName, 10), SampleIPs=make_set(IPAddress, 10)
+    by AppDisplayName, AppId
+| project TimeGenerated = LastSeen, FirstSeen, LastSeen,
+    AppDisplayName, AppId, Attempts, Users, IPs, SampleUsers, SampleIPs
+| order by Attempts desc

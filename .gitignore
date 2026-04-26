@@ -1,0 +1,15 @@
+.DS_Store
+Thumbs.db
+
+# Local shells and tooling
+.env
+.env.*
+*.log
+
+# Generated PowerShell and Python artifacts
+__pycache__/
+*.pyc
+
+# Azure / local test output
+*.json.tmp
+*.bak

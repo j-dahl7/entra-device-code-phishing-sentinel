@@ -1,0 +1,31 @@
+let Window = 2h;
+let DeviceCodeInterrupts =
+    EntraIdSignInEvents
+    | where Timestamp > ago(24h)
+    | where ErrorCode == 50199
+    | project AccountUpn = tolower(AccountUpn), SessionId,
+        InterruptTime = Timestamp;
+let DeviceCodeSuccesses =
+    EntraIdSignInEvents
+    | where Timestamp > ago(24h)
+    | where ErrorCode == 0
+    | project AccountUpn = tolower(AccountUpn), SessionId,
+        DeviceCodeTime = Timestamp, SignInIP = IPAddress, Application;
+let SuspiciousDeviceCodeSessions =
+    DeviceCodeInterrupts
+    | join kind=inner DeviceCodeSuccesses on AccountUpn, SessionId
+    | where DeviceCodeTime between (InterruptTime .. InterruptTime + 5m)
+    | summarize DeviceCodeTime=max(DeviceCodeTime),
+        FirstInterrupt=min(InterruptTime),
+        SignInIPs=make_set(SignInIP, 10),
+        Apps=make_set(Application, 10)
+        by AccountUpn, SessionId;
+CloudAppEvents
+| where Timestamp > ago(24h)
+| where AccountDisplayName == "Device Registration Service"
+| extend AccountUpn = tolower(tostring(RawEventData.ObjectId))
+| join kind=inner SuspiciousDeviceCodeSessions on AccountUpn
+| where Timestamp between (DeviceCodeTime .. DeviceCodeTime + Window)
+| extend DeviceName = tostring(parse_json(tostring(RawEventData.ModifiedProperties))[1].NewValue)
+| project Timestamp, DeviceCodeTime, FirstInterrupt, AccountUpn, SessionId,
+    DeviceName, ActionType, IPAddress, RawEventData
