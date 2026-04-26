@@ -6,8 +6,6 @@ This companion lab supports the Nine Lives, Zero Trust blog post:
 
 Blog: https://nineliveszerotrust.com/blog/entra-device-code-phishing-sentinel/
 
-Lab page: https://nineliveszerotrust.com/labs/entra-device-code-phishing/
-
 The lab focuses on detection engineering for Entra device code phishing without requiring you to run a real phishing flow. It also includes an optional **telemetry generator** that signs in a lab-owned user through a no-secret public client app, discards tokens immediately, and produces real Entra sign-in logs for tuning.
 
 ## Threat Model
