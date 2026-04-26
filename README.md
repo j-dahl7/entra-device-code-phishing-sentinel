@@ -27,6 +27,25 @@ Device code phishing abuses the OAuth device authorization flow:
 | Defender for Cloud Apps | `CloudAppEvents` | Exchange, device-registration, and SaaS activity |
 | Microsoft Defender XDR | `EntraIdSignInEvents` | Microsoft Entra ID P2 data in advanced hunting |
 
+## What This Lab Deploys
+
+The lab has two deployment surfaces:
+
+| Surface | What Deploys | What Does Not Deploy |
+|---|---|---|
+| Microsoft Sentinel | Two scheduled analytics rules that run against `SigninLogs` | Defender XDR advanced hunting queries, because those depend on Defender tables |
+| Microsoft Entra ID | Optional no-secret public client app for lab-owned sign-in telemetry | Mail access, Graph permissions, delegated API permissions, client secrets, or phishing infrastructure |
+
+The companion KQL includes five detection layers, but only the two `SigninLogs` detections are Sentinel analytics rules in this repo. The URL-click, mailbox-abuse, and device-registration layers are Defender XDR advanced hunting queries because they rely on `UrlClickEvents`, `CloudAppEvents`, and `EntraIdSignInEvents`.
+
+## Accuracy Guardrails
+
+- `50199 -> 0` is a useful interrupt-to-success signal when it is joined with protocol, app/client, session, correlation, URL-click, or post-token context. It is not device-code proof by itself.
+- Legitimate Azure CLI and Azure PowerShell sign-ins can produce the same interrupt-to-success ceremony. Keep both app display names and app IDs in your allowlist.
+- Do not default-allow Microsoft Authentication Broker. Treat it as a sensitive exception that needs documented brokered-auth or device-registration scenarios, managed/compliant device controls where possible, trusted-location constraints, and device-registration monitoring.
+- `CloudAppEvents.AccountId` is not guaranteed to be a UPN in every tenant or connected app. Prefer object-ID joins when your data has the needed fields, or validate `AccountId` before relying on a UPN-style join.
+- `UrlClickEvents` depends on Safe Links telemetry. If Defender for Office 365 is not producing URL-click data, run the Sentinel-only rules and use the Defender XDR queries as patterns to adapt later.
+
 ## Queries
 
 ### Sentinel
@@ -123,8 +142,9 @@ $env:AZURE_TENANT_ID = "<tenant-id>"
 
 The script intentionally polls for about 30 seconds before asking you to approve the code. That poll-first pattern is what makes Entra more likely to emit the `50199` interrupt before the successful sign-in. `50199` is a correlation signal, not device-code proof by itself; use it with protocol, app/client, session, correlation, or post-token behavior.
 
+From the companion repo root:
+
 ```powershell
-cd labs/entra-device-code-phishing
 .\scripts\run-device-code-telemetry-test.ps1 -Confirm
 ```
 
@@ -134,7 +154,7 @@ Expected output:
 RunId:     LAB-DC-2026-04-25T20-45-12Z
 UserAgent: NineLivesLab/1.0 (run:LAB-DC-2026-04-25T20-45-12Z)
 
-Do NOT approve yet. The script will poll first to generate the 50199 interrupt telemetry.
+Do NOT approve yet. The script will poll first to generate 50199/CmsiInterrupt-style telemetry.
 Verification URL: https://microsoft.com/devicelogin
 User code:        ABCD-EFGH
 

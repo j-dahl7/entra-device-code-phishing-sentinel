@@ -11,7 +11,7 @@ resource ruleDeviceCode50199ToSuccess 'Microsoft.OperationalInsights/workspaces/
   kind: 'Scheduled'
   properties: {
     displayName: 'LAB - Device Code - 50199 Followed by Success'
-    description: 'Detects Entra sign-in interrupt 50199 followed by a successful sign-in for the same user and correlation ID. Use as a high-signal device-code phishing hunt after allowlist tuning.'
+    description: 'Detects Entra sign-in interrupt 50199 followed by a successful sign-in for the same user and correlation ID. Use as a high-signal interrupt/success hunt for device-code investigation after allowlist tuning.'
     severity: 'High'
     enabled: true
     query: '''

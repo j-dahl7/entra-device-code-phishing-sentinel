@@ -9,8 +9,8 @@
   tenant. Tokens are discarded in memory immediately after issuance.
 
   The script intentionally polls before approval so Entra can emit the 50199
-  "user has not yet entered the code" interrupt, then continues until the lab
-  user approves the sign-in. Use a lab-only account.
+  CmsiInterrupt-style event observed in device-code hunts, then continues
+  until the lab user approves the sign-in. Use a lab-only account.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
@@ -191,7 +191,7 @@ $pollBody = @{
 }
 $headers = @{ 'User-Agent' = $userAgent }
 
-Write-Host 'Do NOT approve yet. The script will poll first to generate the 50199 interrupt telemetry.' -ForegroundColor Yellow
+Write-Host 'Do NOT approve yet. The script will poll first to generate 50199/CmsiInterrupt-style telemetry.' -ForegroundColor Yellow
 Write-Host ('Verification URL: {0}' -f $device.verification_uri)
 Write-Host ('User code:        {0}' -f $device.user_code)
 Write-Host ''
