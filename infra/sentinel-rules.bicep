@@ -6,8 +6,13 @@ targetScope = 'resourceGroup'
 @description('Name of the Sentinel-onboarded Log Analytics workspace.')
 param workspaceName string
 
-resource ruleDeviceCode50199ToSuccess 'Microsoft.OperationalInsights/workspaces/providers/alertRules@2023-02-01-preview' = {
-  name: '${workspaceName}/Microsoft.SecurityInsights/device-code-50199-to-success'
+resource workspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
+  name: workspaceName
+}
+
+resource ruleDeviceCode50199ToSuccess 'Microsoft.SecurityInsights/alertRules@2024-03-01' = {
+  scope: workspace
+  name: 'device-code-50199-to-success'
   kind: 'Scheduled'
   properties: {
     displayName: 'LAB - Device Code - 50199 Followed by Success'
@@ -100,8 +105,9 @@ Interrupts
   }
 }
 
-resource ruleUnapprovedDeviceCodeClient 'Microsoft.OperationalInsights/workspaces/providers/alertRules@2023-02-01-preview' = {
-  name: '${workspaceName}/Microsoft.SecurityInsights/device-code-unapproved-client'
+resource ruleUnapprovedDeviceCodeClient 'Microsoft.SecurityInsights/alertRules@2024-03-01' = {
+  scope: workspace
+  name: 'device-code-unapproved-client'
   kind: 'Scheduled'
   properties: {
     displayName: 'LAB - Device Code - Unapproved Client'

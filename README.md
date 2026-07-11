@@ -8,6 +8,21 @@ Blog: https://nineliveszerotrust.com/blog/entra-device-code-phishing-sentinel/
 
 The lab focuses on detection engineering for Entra device code phishing without requiring you to run a real phishing flow. It also includes an optional **telemetry generator** that signs in a lab-owned user through a no-secret public client app, discards tokens immediately, and produces real Entra sign-in logs for tuning.
 
+## Verification status
+
+**Source-verified — last verified 2026-07-10.** Both Bicep templates compiled with the Microsoft Graph v1.0 dynamic extension, PowerShell parsed, workbook-independent KQL copies were reconciled with their deployed rule definitions, and the synthetic replay data and tracked links were checked. No tenant objects were created, no device code was approved, and no live Sentinel/Defender query was run during this verification.
+
+The optional generator can verify the roles of the Azure CLI user, but it cannot prove that the separate person who approves the browser code is non-privileged. Always use a dedicated, non-admin lab account. This repository does not currently include a standalone license file; confirm reuse terms before redistribution.
+
+## Prerequisites and permissions
+
+- PowerShell 7+, Azure CLI, and Bicep 0.36.1 or newer.
+- A Sentinel-enabled Log Analytics workspace receiving Entra `SigninLogs`.
+- Appropriate workspace permissions to deploy analytics rules, such as Microsoft Sentinel Contributor.
+- For the optional app: permission to create app registrations, such as `Application.ReadWrite.All`, plus an Azure deployment scope where you can run a subscription deployment.
+- For the active-role safety check and cleanup: Azure CLI access to Microsoft Graph. Use a dedicated lab tenant and user without active or eligible privileged roles.
+- Defender for Office 365 and Defender XDR data only if you intend to run the optional `UrlClickEvents`, `CloudAppEvents`, and `EntraIdSignInEvents` hunts.
+
 ## Threat Model
 
 Device code phishing abuses the OAuth device authorization flow:
@@ -120,7 +135,7 @@ Important safety boundaries:
 
 ### 1. Create the lab public client app
 
-`infra/lab-app.bicep` uses the Microsoft Graph Bicep extension dynamic types to create a no-secret, single-tenant public client application. The Graph extension uses Bicep extensibility features, so expect the experimental/extension tooling path rather than a plain ARM resource provider deployment. Creating this app changes tenant state and requires app-registration permissions such as `Application.ReadWrite.All`.
+`infra/lab-app.bicep` uses the generally available Microsoft Graph Bicep v1.0 dynamic extension to create a no-secret, single-tenant public client application. It is an extension deployment rather than a plain ARM resource-provider deployment and requires Bicep 0.36.1 or newer. Creating the app changes tenant state and requires app-registration permissions such as `Application.ReadWrite.All`.
 
 ```bash
 az deployment sub create \
@@ -223,6 +238,24 @@ If you created a temporary user only to provision a Temporary Access Pass, inclu
 
 The helper defaults to dry-run mode, refuses ambiguous display-name matches, and deletes the service principal only when it belongs to the matched lab app or is explicitly selected. Delete lab users only when they were created solely for this lab.
 
+The helper removes Entra artifacts only. Remove the two Sentinel rules separately when the lab is finished:
+
+```bash
+az sentinel alert-rule delete \
+  --resource-group <sentinel-resource-group> \
+  --workspace-name <sentinel-workspace-name> \
+  --rule-id device-code-50199-to-success \
+  --yes
+
+az sentinel alert-rule delete \
+  --resource-group <sentinel-resource-group> \
+  --workspace-name <sentinel-workspace-name> \
+  --rule-id device-code-unapproved-client \
+  --yes
+```
+
+Preview the Entra cleanup first, confirm the tenant and exact object identifiers, and only then rerun with `-Execute`.
+
 ## Triage
 
 When a rule fires:
@@ -234,6 +267,10 @@ When a rule fires:
 5. Search payroll, finance, HR, and Workday-style app events after the sign-in.
 6. Convert confirmed false positives into a documented device-code allowlist.
 
+## Cost
+
+The optional app registration has no direct compute cost. Costs and licensing come from the existing Sentinel/Log Analytics workspace, Entra sign-in-log retention and ingestion, and any Defender for Office 365, Defender for Cloud Apps, Defender XDR, or Entra ID P2 features used by the advanced hunts. Confirm current tenant licensing and Log Analytics pricing before rollout.
+
 ## Notes
 
 - Do not blindly block device code flow before inventorying legitimate dependencies.
@@ -243,3 +280,11 @@ When a rule fires:
 - Treat Microsoft Authentication Broker as a sensitive exception, not a default allowlist entry. Add it only for documented brokered-auth or device-registration scenarios with extra controls and monitoring.
 - Post-auth behavior is where device code phishing turns into business impact.
 - The telemetry generator creates authentication telemetry only; it does not simulate URL clicks, mailbox access, or device registration.
+
+## Troubleshooting
+
+- **Graph Bicep extension will not restore:** verify Bicep 0.36.1+, network access to `mcr.microsoft.com`, and the `infra/bicepconfig.json` extension alias.
+- **Role safety check fails:** the Azure CLI identity needs permission to read its own directory-role memberships. Do not bypass the check unless you have independently confirmed a non-admin, lab-only account.
+- **No `50199` row:** Entra sign-in telemetry is tenant-dependent and can be aggregated or delayed. The script's poll-first sequence improves observability but does not guarantee a specific error code.
+- **No Sentinel incident:** first verify raw `SigninLogs`, then the correlation preview, then the scheduled-rule window. Incident creation can lag both ingestion and query results.
+- **Defender XDR query has no rows:** those queries require their named Defender tables; they are not deployed as Sentinel rules by this lab.

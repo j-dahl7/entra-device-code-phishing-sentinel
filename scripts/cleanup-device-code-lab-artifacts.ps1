@@ -238,10 +238,10 @@ function Test-ExpectedApplicationTags {
 function Resolve-LabApplication {
   if ($AppObjectId) {
     $application = Get-GraphObject -Collection 'applications' -ObjectId $AppObjectId -Select $applicationSelect
-    if ($PSBoundParameters.ContainsKey('ClientId') -and $ClientId -and $application.appId -ne $ClientId) {
+    if ($ClientId -and $application.appId -ne $ClientId) {
       throw ('Application object {0} has appId {1}, not ClientId {2}.' -f $AppObjectId, $application.appId, $ClientId)
     }
-    if ($PSBoundParameters.ContainsKey('AppDisplayName') -and $AppDisplayName -and $application.displayName -ne $AppDisplayName) {
+    if ($AppDisplayName -and $application.displayName -ne $AppDisplayName) {
       throw ('Application object {0} has displayName "{1}", not "{2}".' -f $AppObjectId, $application.displayName, $AppDisplayName)
     }
     return $application
@@ -250,7 +250,7 @@ function Resolve-LabApplication {
   if ($ClientId) {
     $matches = Find-GraphObjects -Collection 'applications' -Filter ('appId eq {0}' -f (New-ODataStringLiteral -Value $ClientId)) -Select $applicationSelect
     $application = Resolve-SingleObject -Kind 'application' -Objects $matches -Lookup ('client ID {0}' -f $ClientId)
-    if ($application -and $PSBoundParameters.ContainsKey('AppDisplayName') -and $AppDisplayName -and $application.displayName -ne $AppDisplayName) {
+    if ($application -and $AppDisplayName -and $application.displayName -ne $AppDisplayName) {
       throw ('Application client ID {0} has displayName "{1}", not "{2}".' -f $ClientId, $application.displayName, $AppDisplayName)
     }
     return $application

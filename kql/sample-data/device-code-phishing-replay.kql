@@ -1,7 +1,7 @@
 let SigninLogs = datatable(TimeGenerated:datetime, UserPrincipalName:string, ResultType:string, ResultDescription:string, CorrelationId:string, SessionId:string, IPAddress:string, AppDisplayName:string, AppId:string, UserAgent:string, AuthenticationProtocol:string)
 [
-    datetime(2026-04-25T14:00:00Z), "alex@contoso.com", "50199", "User is required to authorize device code", "corr-001", "sess-001", "203.0.113.50", "LAB - Nine Lives Device Code Telemetry", "21cac876-a276-44ce-826a-ea515333e546", "NineLivesLab/1.0", "deviceCode",
-    datetime(2026-04-25T14:03:12Z), "alex@contoso.com", "0", "Success", "corr-001", "sess-001", "203.0.113.50", "LAB - Nine Lives Device Code Telemetry", "21cac876-a276-44ce-826a-ea515333e546", "NineLivesLab/1.0", "deviceCode",
+    datetime(2026-04-25T14:00:00Z), "alex@contoso.com", "50199", "User is required to authorize device code", "corr-001", "sess-001", "203.0.113.50", "LAB - Nine Lives Device Code Telemetry", "11111111-1111-1111-1111-111111111111", "NineLivesLab/1.0", "deviceCode",
+    datetime(2026-04-25T14:03:12Z), "alex@contoso.com", "0", "Success", "corr-001", "sess-001", "203.0.113.50", "LAB - Nine Lives Device Code Telemetry", "11111111-1111-1111-1111-111111111111", "NineLivesLab/1.0", "deviceCode",
     datetime(2026-04-25T14:45:22Z), "casey@contoso.com", "0", "Success", "corr-002", "sess-002", "198.51.100.8", "Microsoft Azure CLI", "04b07795-8ddb-461a-bbee-02f9e1bf7b46", "AzureCLI", "deviceCode"
 ];
 let Window = 5m;
