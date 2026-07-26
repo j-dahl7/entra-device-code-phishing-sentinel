@@ -1,14 +1,19 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-  Safely previews or removes Entra artifacts created for the device-code telemetry lab.
+  Preflights and removes the exact Entra application and service principal
+  created by the device-code telemetry lab.
 
 .DESCRIPTION
-  Finds the lab public client application, its service principal, and optional
-  lab users by explicit identifiers or exact display names. Optional users can
-  include the device-code lab user and a disposable TAP provisioner account.
-  The script defaults to dry-run mode and only deletes when -Execute is
-  supplied. Destructive operations use ShouldProcess confirmation.
+  Cleanup requires the immutable tenant ID, client ID, application object ID,
+  service-principal object ID, and deployment-specific uniqueName returned by
+  infra/lab-app.bicep. Every object and ownership marker is validated before
+  the first delete. The script never discovers a deletion target by display
+  name and never deletes user objects, because the template does not create
+  users.
+
+  The default run is read-only. -Execute authorizes deletion, and PowerShell
+  ShouldProcess still supports -WhatIf and -Confirm.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
@@ -19,42 +24,61 @@ param(
   [string]$ClientId = $env:DEVICE_CODE_LAB_CLIENT_ID,
 
   [Parameter(Mandatory = $false)]
-  [string]$AppObjectId,
+  [string]$AppObjectId = $env:DEVICE_CODE_LAB_APP_OBJECT_ID,
 
   [Parameter(Mandatory = $false)]
-  [string]$AppDisplayName,
+  [string]$ServicePrincipalObjectId = $env:DEVICE_CODE_LAB_SP_OBJECT_ID,
 
   [Parameter(Mandatory = $false)]
-  [string]$ServicePrincipalObjectId,
-
-  [Parameter(Mandatory = $false)]
-  [string]$LabUserObjectId,
-
-  [Parameter(Mandatory = $false)]
-  [string]$LabUserPrincipalName,
-
-  [Parameter(Mandatory = $false)]
-  [string]$LabUserDisplayName,
-
-  [Parameter(Mandatory = $false)]
-  [string]$TapProvisionerObjectId,
-
-  [Parameter(Mandatory = $false)]
-  [string]$TapProvisionerPrincipalName,
-
-  [Parameter(Mandatory = $false)]
-  [string]$TapProvisionerDisplayName,
+  [string]$UniqueName = $env:DEVICE_CODE_LAB_UNIQUE_NAME,
 
   [Parameter(Mandatory = $false)]
   [switch]$Execute
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
 
-$applicationSelect = 'id,appId,displayName,tags'
-$servicePrincipalSelect = 'id,appId,displayName'
-$userSelect = 'id,userPrincipalName,displayName,accountEnabled'
-$expectedApplicationTags = @('NineLivesZeroTrust', 'Lab', 'DeviceCodeTelemetry')
+$ownerTag = 'NineLives.Owner:EntraDeviceCodePhishingSentinel:v1'
+$expectedApplicationTags = @()
+$applicationSelect = 'id,appId,displayName,uniqueName,tags,signInAudience,isFallbackPublicClient,publicClient,passwordCredentials,keyCredentials'
+$servicePrincipalSelect = 'id,appId,displayName,tags,servicePrincipalType,appOwnerOrganizationId'
+
+function Assert-GuidValue {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+
+    [Parameter(Mandatory = $false)]
+    [string]$Value
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    throw ('{0} is required. Use the exact value returned by the lab deployment.' -f $Name)
+  }
+
+  $parsed = [guid]::Empty
+  if (-not [guid]::TryParse($Value, [ref]$parsed) -or $parsed -eq [guid]::Empty) {
+    throw ('{0} must be a non-empty GUID; received "{1}".' -f $Name, $Value)
+  }
+
+  return $parsed.ToString()
+}
+
+function Assert-LabUniqueName {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$Value
+  )
+
+  $prefix = 'nine-lives-device-code-telemetry-lab-'
+  if ([string]::IsNullOrWhiteSpace($Value) -or -not $Value.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+    throw ('UniqueName must use the exact lab prefix "{0}" followed by a GUID.' -f $prefix)
+  }
+  $suffix = $Value.Substring($prefix.Length)
+  $null = Assert-GuidValue -Name 'UniqueName GUID suffix' -Value $suffix
+  return $Value
+}
 
 function Invoke-AzCli {
   param(
@@ -67,7 +91,7 @@ function Invoke-AzCli {
   $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
 
   if ($exitCode -ne 0) {
-    throw ('az {0} failed: {1}' -f ($Arguments -join ' '), $text)
+    throw ('Azure CLI failed (az {0}): {1}' -f ($Arguments -join ' '), $text)
   }
 
   return $text
@@ -81,94 +105,42 @@ function Invoke-AzCliJson {
 
   $text = Invoke-AzCli -Arguments $Arguments
   if ([string]::IsNullOrWhiteSpace($text)) {
-    return $null
+    throw ('Azure CLI returned an empty JSON response (az {0}).' -f ($Arguments -join ' '))
   }
 
-  return $text | ConvertFrom-Json
-}
-
-function Assert-AzCliTenant {
-  param(
-    [Parameter(Mandatory = $false)]
-    [string]$ExpectedTenantId
-  )
-
-  if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-    throw 'Azure CLI was not found. Install az and sign in to the lab tenant before running cleanup.'
+  try {
+    return $text | ConvertFrom-Json
   }
-
-  $context = Invoke-AzCliJson -Arguments @('account', 'show', '-o', 'json')
-  if (-not $context -or -not $context.tenantId) {
-    throw 'Azure CLI is not signed in. Run az login against the lab tenant before running cleanup.'
+  catch {
+    throw ('Azure CLI returned invalid JSON (az {0}): {1}' -f ($Arguments -join ' '), $_.Exception.Message)
   }
-
-  if ($ExpectedTenantId -and $context.tenantId -ne $ExpectedTenantId) {
-    throw ('Azure CLI is signed in to tenant {0}, but TenantId is {1}. Run az login --tenant {1} or omit -TenantId after selecting the lab tenant.' -f $context.tenantId, $ExpectedTenantId)
-  }
-
-  return $context
 }
 
 function New-GraphUrl {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$Path,
-
-    [Parameter(Mandatory = $false)]
-    [hashtable]$Query = @{}
-  )
-
-  $trimmedPath = $Path.TrimStart('/')
-  if ($Query.Count -eq 0) {
-    return 'https://graph.microsoft.com/v1.0/{0}' -f $trimmedPath
-  }
-
-  $pairs = foreach ($key in $Query.Keys) {
-    '{0}={1}' -f [System.Uri]::EscapeDataString($key), [System.Uri]::EscapeDataString([string]$Query[$key])
-  }
-
-  return 'https://graph.microsoft.com/v1.0/{0}?{1}' -f $trimmedPath, ($pairs -join '&')
-}
-
-function New-ODataStringLiteral {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Value
-  )
-
-  return "'{0}'" -f $Value.Replace("'", "''")
-}
-
-function Find-GraphObjects {
-  param(
-    [Parameter(Mandatory = $true)]
-    [ValidateSet('applications', 'servicePrincipals', 'users')]
+    [ValidateSet('applications', 'servicePrincipals')]
     [string]$Collection,
 
     [Parameter(Mandatory = $true)]
-    [string]$Filter,
+    [string]$ObjectId,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [string]$Select
   )
 
-  $url = New-GraphUrl -Path $Collection -Query @{
-    '$filter' = $Filter
-    '$select' = $Select
+  $encodedId = [System.Uri]::EscapeDataString($ObjectId)
+  $url = 'https://graph.microsoft.com/v1.0/{0}/{1}' -f $Collection, $encodedId
+  if ($Select) {
+    $url = '{0}?{1}={2}' -f $url, [System.Uri]::EscapeDataString('$select'), [System.Uri]::EscapeDataString($Select)
   }
-  $response = Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $url, '-o', 'json')
-
-  if (-not $response -or -not ($response.PSObject.Properties.Name -contains 'value')) {
-    return @()
-  }
-
-  return @($response.value)
+  return $url
 }
 
-function Get-GraphObject {
+function Get-GraphObjectById {
   param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('applications', 'servicePrincipals', 'users')]
+    [ValidateSet('applications', 'servicePrincipals')]
     [string]$Collection,
 
     [Parameter(Mandatory = $true)]
@@ -178,365 +150,149 @@ function Get-GraphObject {
     [string]$Select
   )
 
-  $path = '{0}/{1}' -f $Collection, [System.Uri]::EscapeDataString($ObjectId)
-  $url = New-GraphUrl -Path $path -Query @{ '$select' = $Select }
-  return Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $url, '-o', 'json')
+  $url = New-GraphUrl -Collection $Collection -ObjectId $ObjectId -Select $Select
+  return Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $url, '--only-show-errors', '-o', 'json')
 }
 
-function Resolve-SingleObject {
+function Assert-ExactId {
   param(
     [Parameter(Mandatory = $true)]
     [string]$Kind,
 
     [Parameter(Mandatory = $true)]
-    [object[]]$Objects,
-
-    [Parameter(Mandatory = $true)]
-    [string]$Lookup
-  )
-
-  if ($Objects.Count -eq 0) {
-    Write-Warning ('No {0} found for {1}.' -f $Kind, $Lookup)
-    return $null
-  }
-
-  if ($Objects.Count -gt 1) {
-    $matches = $Objects | ForEach-Object {
-      if ($_.PSObject.Properties.Name -contains 'appId') {
-        'displayName="{0}", appId="{1}", objectId="{2}"' -f $_.displayName, $_.appId, $_.id
-      }
-      elseif ($_.PSObject.Properties.Name -contains 'userPrincipalName') {
-        'displayName="{0}", userPrincipalName="{1}", objectId="{2}"' -f $_.displayName, $_.userPrincipalName, $_.id
-      }
-      else {
-        'displayName="{0}", objectId="{1}"' -f $_.displayName, $_.id
-      }
-    }
-
-    throw ('Refusing to choose between {0} {1} matches for {2}. Rerun with an object ID or client/user principal name. Matches: {3}' -f $Objects.Count, $Kind, $Lookup, ($matches -join '; '))
-  }
-
-  return $Objects[0]
-}
-
-function Test-ExpectedApplicationTags {
-  param(
-    [Parameter(Mandatory = $true)]
-    [object]$Application
-  )
-
-  $tags = @($Application.tags)
-  foreach ($tag in $expectedApplicationTags) {
-    if ($tags -notcontains $tag) {
-      return $false
-    }
-  }
-
-  return $true
-}
-
-function Resolve-LabApplication {
-  if ($AppObjectId) {
-    $application = Get-GraphObject -Collection 'applications' -ObjectId $AppObjectId -Select $applicationSelect
-    if ($PSBoundParameters.ContainsKey('ClientId') -and $ClientId -and $application.appId -ne $ClientId) {
-      throw ('Application object {0} has appId {1}, not ClientId {2}.' -f $AppObjectId, $application.appId, $ClientId)
-    }
-    if ($PSBoundParameters.ContainsKey('AppDisplayName') -and $AppDisplayName -and $application.displayName -ne $AppDisplayName) {
-      throw ('Application object {0} has displayName "{1}", not "{2}".' -f $AppObjectId, $application.displayName, $AppDisplayName)
-    }
-    return $application
-  }
-
-  if ($ClientId) {
-    $matches = Find-GraphObjects -Collection 'applications' -Filter ('appId eq {0}' -f (New-ODataStringLiteral -Value $ClientId)) -Select $applicationSelect
-    $application = Resolve-SingleObject -Kind 'application' -Objects $matches -Lookup ('client ID {0}' -f $ClientId)
-    if ($application -and $PSBoundParameters.ContainsKey('AppDisplayName') -and $AppDisplayName -and $application.displayName -ne $AppDisplayName) {
-      throw ('Application client ID {0} has displayName "{1}", not "{2}".' -f $ClientId, $application.displayName, $AppDisplayName)
-    }
-    return $application
-  }
-
-  if ($AppDisplayName) {
-    $matches = Find-GraphObjects -Collection 'applications' -Filter ('displayName eq {0}' -f (New-ODataStringLiteral -Value $AppDisplayName)) -Select $applicationSelect
-    $application = Resolve-SingleObject -Kind 'application' -Objects $matches -Lookup ('display name "{0}"' -f $AppDisplayName)
-    if ($application -and -not (Test-ExpectedApplicationTags -Application $application)) {
-      throw ('Refusing to delete application "{0}" by display name because it does not have the expected lab tags: {1}.' -f $application.displayName, ($expectedApplicationTags -join ', '))
-    }
-    return $application
-  }
-
-  return $null
-}
-
-function Resolve-LabServicePrincipal {
-  param(
-    [Parameter(Mandatory = $false)]
-    [object]$Application
-  )
-
-  if ($ServicePrincipalObjectId) {
-    $servicePrincipal = Get-GraphObject -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId -Select $servicePrincipalSelect
-    if ($Application -and $servicePrincipal.appId -ne $Application.appId) {
-      throw ('Service principal object {0} has appId {1}, not application appId {2}.' -f $ServicePrincipalObjectId, $servicePrincipal.appId, $Application.appId)
-    }
-    return $servicePrincipal
-  }
-
-  if ($Application) {
-    $matches = Find-GraphObjects -Collection 'servicePrincipals' -Filter ('appId eq {0}' -f (New-ODataStringLiteral -Value $Application.appId)) -Select $servicePrincipalSelect
-    return Resolve-SingleObject -Kind 'service principal' -Objects $matches -Lookup ('application appId {0}' -f $Application.appId)
-  }
-
-  if ($ClientId) {
-    $matches = Find-GraphObjects -Collection 'servicePrincipals' -Filter ('appId eq {0}' -f (New-ODataStringLiteral -Value $ClientId)) -Select $servicePrincipalSelect
-    return Resolve-SingleObject -Kind 'service principal' -Objects $matches -Lookup ('client ID {0}' -f $ClientId)
-  }
-
-  if ($AppDisplayName) {
-    $matches = Find-GraphObjects -Collection 'servicePrincipals' -Filter ('displayName eq {0}' -f (New-ODataStringLiteral -Value $AppDisplayName)) -Select $servicePrincipalSelect
-    return Resolve-SingleObject -Kind 'service principal' -Objects $matches -Lookup ('display name "{0}"' -f $AppDisplayName)
-  }
-
-  return $null
-}
-
-function Resolve-UserFromSelectors {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Purpose,
+    [string]$Expected,
 
     [Parameter(Mandatory = $false)]
-    [string]$ObjectId,
-
-    [Parameter(Mandatory = $false)]
-    [string]$UserPrincipalName,
-
-    [Parameter(Mandatory = $false)]
-    [string]$DisplayName
+    [string]$Actual
   )
 
-  if ($ObjectId) {
-    $user = Get-GraphObject -Collection 'users' -ObjectId $ObjectId -Select $userSelect
-    if ($UserPrincipalName -and $user.userPrincipalName -ne $UserPrincipalName) {
-      throw ('{0} object {1} has userPrincipalName "{2}", not "{3}".' -f $Purpose, $ObjectId, $user.userPrincipalName, $UserPrincipalName)
-    }
-    if ($DisplayName -and $user.displayName -ne $DisplayName) {
-      throw ('{0} object {1} has displayName "{2}", not "{3}".' -f $Purpose, $ObjectId, $user.displayName, $DisplayName)
-    }
-    return $user
+  if ([string]::IsNullOrWhiteSpace($Actual) -or -not $Actual.Equals($Expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw ('{0} ID mismatch. Expected {1}; Microsoft Graph returned {2}.' -f $Kind, $Expected, $Actual)
   }
+}
 
-  if ($UserPrincipalName) {
-    $matches = Find-GraphObjects -Collection 'users' -Filter ('userPrincipalName eq {0}' -f (New-ODataStringLiteral -Value $UserPrincipalName)) -Select $userSelect
-    $user = Resolve-SingleObject -Kind $Purpose -Objects $matches -Lookup ('userPrincipalName "{0}"' -f $UserPrincipalName)
-    if ($user -and $DisplayName -and $user.displayName -ne $DisplayName) {
-      throw ('{0} userPrincipalName "{1}" has displayName "{2}", not "{3}".' -f $Purpose, $UserPrincipalName, $user.displayName, $DisplayName)
+function Assert-OwnershipTags {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Kind,
+
+    [Parameter(Mandatory = $true)]
+    [object]$Object
+  )
+
+  $actualTags = @($Object.tags)
+  foreach ($expectedTag in $expectedApplicationTags) {
+    if ($actualTags -notcontains $expectedTag) {
+      throw ('Refusing cleanup: {0} {1} is missing exact ownership tag "{2}".' -f $Kind, $Object.id, $expectedTag)
     }
-    return $user
   }
-
-  if ($DisplayName) {
-    $matches = Find-GraphObjects -Collection 'users' -Filter ('displayName eq {0}' -f (New-ODataStringLiteral -Value $DisplayName)) -Select $userSelect
-    return Resolve-SingleObject -Kind $Purpose -Objects $matches -Lookup ('display name "{0}"' -f $DisplayName)
-  }
-
-  return $null
 }
 
-function Resolve-LabUser {
-  Resolve-UserFromSelectors `
-    -Purpose 'lab user' `
-    -ObjectId $LabUserObjectId `
-    -UserPrincipalName $LabUserPrincipalName `
-    -DisplayName $LabUserDisplayName
-}
-
-function Resolve-TapProvisionerUser {
-  Resolve-UserFromSelectors `
-    -Purpose 'TAP provisioner user' `
-    -ObjectId $TapProvisionerObjectId `
-    -UserPrincipalName $TapProvisionerPrincipalName `
-    -DisplayName $TapProvisionerDisplayName
-}
-
-function Format-ApplicationSummary {
+function Remove-GraphObjectById {
   param(
     [Parameter(Mandatory = $true)]
-    [object]$Application
-  )
-
-  return 'displayName="{0}", clientId="{1}", objectId="{2}"' -f $Application.displayName, $Application.appId, $Application.id
-}
-
-function Format-ServicePrincipalSummary {
-  param(
-    [Parameter(Mandatory = $true)]
-    [object]$ServicePrincipal
-  )
-
-  return 'displayName="{0}", appId="{1}", objectId="{2}"' -f $ServicePrincipal.displayName, $ServicePrincipal.appId, $ServicePrincipal.id
-}
-
-function Format-UserSummary {
-  param(
-    [Parameter(Mandatory = $true)]
-    [object]$User
-  )
-
-  return 'displayName="{0}", userPrincipalName="{1}", objectId="{2}"' -f $User.displayName, $User.userPrincipalName, $User.id
-}
-
-function Remove-GraphObject {
-  param(
-    [Parameter(Mandatory = $true)]
-    [ValidateSet('applications', 'servicePrincipals', 'users')]
+    [ValidateSet('applications', 'servicePrincipals')]
     [string]$Collection,
 
     [Parameter(Mandatory = $true)]
-    [string]$ObjectId,
-
-    [Parameter(Mandatory = $true)]
-    [string]$Kind,
-
-    [Parameter(Mandatory = $true)]
-    [string]$Summary
+    [string]$ObjectId
   )
 
-  $url = New-GraphUrl -Path ('{0}/{1}' -f $Collection, [System.Uri]::EscapeDataString($ObjectId))
-  $target = '{0}: {1}' -f $Kind, $Summary
-  if (-not $PSCmdlet.ShouldProcess($target, 'Delete from Microsoft Graph')) {
-    return $false
-  }
-
+  $url = New-GraphUrl -Collection $Collection -ObjectId $ObjectId
   $null = Invoke-AzCli -Arguments @('rest', '--method', 'DELETE', '--url', $url, '--only-show-errors')
-  Write-Host ('Deleted {0}: {1}' -f $Kind, $Summary)
-  return $true
 }
 
-function Write-PlanLine {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Label,
-
-    [Parameter(Mandatory = $true)]
-    [string]$Summary
-  )
-
-  Write-Host ('- {0}: {1}' -f $Label, $Summary)
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+  throw 'Azure CLI was not found. Install Azure CLI and sign in to the exact lab tenant before cleanup.'
 }
 
-$hasAppSelector = $ClientId -or $AppObjectId -or $AppDisplayName -or $ServicePrincipalObjectId
-$hasUserSelector = $LabUserObjectId -or $LabUserPrincipalName -or $LabUserDisplayName -or $TapProvisionerObjectId -or $TapProvisionerPrincipalName -or $TapProvisionerDisplayName
+$TenantId = Assert-GuidValue -Name 'TenantId' -Value $TenantId
+$ClientId = Assert-GuidValue -Name 'ClientId' -Value $ClientId
+$AppObjectId = Assert-GuidValue -Name 'AppObjectId' -Value $AppObjectId
+$ServicePrincipalObjectId = Assert-GuidValue -Name 'ServicePrincipalObjectId' -Value $ServicePrincipalObjectId
+$UniqueName = Assert-LabUniqueName -Value $UniqueName
+$expectedApplicationTags = @(
+  $ownerTag
+  ('NineLives.UniqueName:{0}' -f $UniqueName)
+  'NineLivesZeroTrust'
+  'Lab'
+  'DeviceCodeTelemetry'
+  'NoSecrets'
+)
 
-if (-not ($hasAppSelector -or $hasUserSelector)) {
-  throw 'Provide at least one explicit selector: -ClientId, -AppObjectId, -AppDisplayName, -ServicePrincipalObjectId, -LabUserObjectId, -LabUserPrincipalName, -LabUserDisplayName, -TapProvisionerObjectId, -TapProvisionerPrincipalName, or -TapProvisionerDisplayName.'
+$context = Invoke-AzCliJson -Arguments @('account', 'show', '--only-show-errors', '-o', 'json')
+if (-not $context.tenantId) {
+  throw 'Azure CLI account context did not include a tenant ID.'
+}
+$activeTenantId = Assert-GuidValue -Name 'active Azure CLI tenant ID' -Value ([string]$context.tenantId)
+if (-not $activeTenantId.Equals($TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw ('Azure CLI is signed in to tenant {0}, not requested tenant {1}. No deletes were attempted.' -f $activeTenantId, $TenantId)
 }
 
-$context = Assert-AzCliTenant -ExpectedTenantId $TenantId
-$activeTenantId = if ($TenantId) { $TenantId } else { $context.tenantId }
+# Two-phase cleanup: resolve and validate every immutable object before any DELETE.
+$application = Get-GraphObjectById -Collection 'applications' -ObjectId $AppObjectId -Select $applicationSelect
+$servicePrincipal = Get-GraphObjectById -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId -Select $servicePrincipalSelect
 
-$application = Resolve-LabApplication
-$servicePrincipal = Resolve-LabServicePrincipal -Application $application
-$labUser = Resolve-LabUser
-$tapProvisionerUser = Resolve-TapProvisionerUser
-
-if ($labUser -and $tapProvisionerUser -and $labUser.id -eq $tapProvisionerUser.id) {
-  Write-Warning 'Lab user and TAP provisioner selectors resolved to the same user object. It will be listed and deleted once.'
-  $tapProvisionerUser = $null
+Assert-ExactId -Kind 'application object' -Expected $AppObjectId -Actual ([string]$application.id)
+Assert-ExactId -Kind 'application client' -Expected $ClientId -Actual ([string]$application.appId)
+Assert-OwnershipTags -Kind 'application' -Object $application
+if ([string]$application.uniqueName -cne $UniqueName) {
+  throw ('Refusing cleanup: application {0} has uniqueName "{1}", not "{2}".' -f $AppObjectId, $application.uniqueName, $UniqueName)
 }
 
-if (-not ($application -or $servicePrincipal -or $labUser -or $tapProvisionerUser)) {
-  Write-Host 'No matching lab artifacts were found. Nothing to clean up.'
-  return
+if ($application.signInAudience -ne 'AzureADMyOrg') {
+  throw ('Refusing cleanup: application {0} is not single-tenant (signInAudience={1}).' -f $AppObjectId, $application.signInAudience)
+}
+if ($application.isFallbackPublicClient -ne $true) {
+  throw ('Refusing cleanup: application {0} is not marked as the lab public client.' -f $AppObjectId)
+}
+$redirectUris = @($application.publicClient.redirectUris)
+if ($redirectUris.Count -ne 1 -or $redirectUris[0] -cne 'http://localhost') {
+  throw ('Refusing cleanup: application {0} does not have the exact lab public-client redirect URI.' -f $AppObjectId)
+}
+if (@($application.passwordCredentials).Count -ne 0 -or @($application.keyCredentials).Count -ne 0) {
+  throw ('Refusing cleanup: application {0} contains credentials that the lab template never creates.' -f $AppObjectId)
+}
+
+Assert-ExactId -Kind 'service principal object' -Expected $ServicePrincipalObjectId -Actual ([string]$servicePrincipal.id)
+Assert-ExactId -Kind 'service principal client' -Expected $ClientId -Actual ([string]$servicePrincipal.appId)
+Assert-OwnershipTags -Kind 'service principal' -Object $servicePrincipal
+
+if ($servicePrincipal.servicePrincipalType -and $servicePrincipal.servicePrincipalType -ne 'Application') {
+  throw ('Refusing cleanup: service principal {0} has unexpected type "{1}".' -f $ServicePrincipalObjectId, $servicePrincipal.servicePrincipalType)
+}
+if ($servicePrincipal.appOwnerOrganizationId) {
+  $ownerTenantId = Assert-GuidValue -Name 'service principal appOwnerOrganizationId' -Value ([string]$servicePrincipal.appOwnerOrganizationId)
+  if (-not $ownerTenantId.Equals($TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw ('Refusing cleanup: service principal {0} belongs to application tenant {1}, not {2}.' -f $ServicePrincipalObjectId, $ownerTenantId, $TenantId)
+  }
 }
 
 Write-Host ''
-Write-Host '=== Device-code lab cleanup plan ===' -ForegroundColor Cyan
-Write-Host ('Tenant: {0}' -f $activeTenantId)
-
-if ($application) {
-  Write-PlanLine -Label 'Application registration' -Summary (Format-ApplicationSummary -Application $application)
-  if (-not (Test-ExpectedApplicationTags -Application $application)) {
-    Write-Warning ('Matched application does not contain all expected lab tags: {0}. Confirm the object details before executing cleanup.' -f ($expectedApplicationTags -join ', '))
-  }
-}
-
-if ($servicePrincipal) {
-  $servicePrincipalSummary = Format-ServicePrincipalSummary -ServicePrincipal $servicePrincipal
-  if ($application) {
-    Write-PlanLine -Label 'Service principal' -Summary ('{0} (expected to be removed with the application registration)' -f $servicePrincipalSummary)
-  }
-  else {
-    Write-PlanLine -Label 'Service principal' -Summary $servicePrincipalSummary
-  }
-}
-
-if ($labUser) {
-  Write-PlanLine -Label 'Lab user' -Summary (Format-UserSummary -User $labUser)
-}
-
-if ($tapProvisionerUser) {
-  Write-PlanLine -Label 'TAP provisioner user' -Summary (Format-UserSummary -User $tapProvisionerUser)
-}
+Write-Host '=== Exact device-code lab cleanup plan ===' -ForegroundColor Cyan
+Write-Host ('Tenant:                   {0}' -f $TenantId)
+Write-Host ('Application:              displayName="{0}", clientId="{1}", objectId="{2}"' -f $application.displayName, $ClientId, $AppObjectId)
+Write-Host ('Service principal:        displayName="{0}", clientId="{1}", objectId="{2}"' -f $servicePrincipal.displayName, $ClientId, $ServicePrincipalObjectId)
+Write-Host ('Graph unique name:         {0}' -f $UniqueName)
+Write-Host ('Verified ownership marker: {0}' -f $ownerTag)
+Write-Host 'User objects:              never selected or deleted by this script'
 
 if (-not $Execute) {
   Write-Host ''
-  Write-Host 'Dry run only. Rerun with -Execute to delete the listed artifacts; PowerShell will ask for confirmation before each delete.' -ForegroundColor Yellow
+  Write-Host 'Dry run only. No objects were deleted. Rerun with -Execute after reviewing every immutable ID.' -ForegroundColor Yellow
   return
 }
 
-Write-Host ''
-Write-Host 'Executing cleanup. Each delete still requires PowerShell confirmation unless you explicitly suppress common-parameter prompts.' -ForegroundColor Yellow
-
-$applicationDeleted = $false
-if ($application) {
-  $applicationDeleted = Remove-GraphObject `
-    -Collection 'applications' `
-    -ObjectId $application.id `
-    -Kind 'application registration' `
-    -Summary (Format-ApplicationSummary -Application $application)
+$target = 'tenant {0}; servicePrincipal/{1}; applications/{2}' -f $TenantId, $ServicePrincipalObjectId, $AppObjectId
+if (-not $PSCmdlet.ShouldProcess($target, 'Delete the two exact owner-marked Microsoft Graph objects')) {
+  return
 }
 
-if ($servicePrincipal) {
-  if ($application) {
-    if ($applicationDeleted) {
-      $remainingServicePrincipal = Resolve-LabServicePrincipal -Application $application
-      if ($remainingServicePrincipal) {
-        $null = Remove-GraphObject `
-          -Collection 'servicePrincipals' `
-          -ObjectId $remainingServicePrincipal.id `
-          -Kind 'service principal' `
-          -Summary (Format-ServicePrincipalSummary -ServicePrincipal $remainingServicePrincipal)
-      }
-      else {
-        Write-Host 'Service principal is no longer present after application deletion.'
-      }
-    }
-    else {
-      Write-Host 'Skipping service principal cleanup because the application registration was not deleted.'
-    }
-  }
-  else {
-    $null = Remove-GraphObject `
-      -Collection 'servicePrincipals' `
-      -ObjectId $servicePrincipal.id `
-      -Kind 'service principal' `
-      -Summary (Format-ServicePrincipalSummary -ServicePrincipal $servicePrincipal)
-  }
-}
+# Delete the exact service principal first. A failure is fatal and leaves the
+# application registration untouched for a safe retry or manual investigation.
+Remove-GraphObjectById -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId
+Write-Host ('Deleted exact service principal object {0}.' -f $ServicePrincipalObjectId)
 
-if ($labUser) {
-  $null = Remove-GraphObject `
-    -Collection 'users' `
-    -ObjectId $labUser.id `
-    -Kind 'lab user' `
-    -Summary (Format-UserSummary -User $labUser)
-}
-
-if ($tapProvisionerUser) {
-  $null = Remove-GraphObject `
-    -Collection 'users' `
-    -ObjectId $tapProvisionerUser.id `
-    -Kind 'TAP provisioner user' `
-    -Summary (Format-UserSummary -User $tapProvisionerUser)
-}
+Remove-GraphObjectById -Collection 'applications' -ObjectId $AppObjectId
+Write-Host ('Deleted exact application object {0}.' -f $AppObjectId)
+Write-Host 'Cleanup completed. No user object was touched.' -ForegroundColor Green

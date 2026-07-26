@@ -3,23 +3,28 @@ let DeviceCodeInterrupts =
     EntraIdSignInEvents
     | where Timestamp > ago(24h)
     | where ErrorCode == 50199
-    | project AccountUpn = tolower(AccountUpn), SessionId,
+    | extend AccountObjectId = tolower(AccountObjectId)
+    | where isnotempty(AccountObjectId) and isnotempty(SessionId)
+    | project AccountObjectId, AccountUpn = tolower(AccountUpn), SessionId,
         InterruptTime = Timestamp;
 let DeviceCodeSuccesses =
     EntraIdSignInEvents
     | where Timestamp > ago(24h)
     | where ErrorCode == 0
-    | project AccountUpn = tolower(AccountUpn), SessionId,
-        DeviceCodeTime = Timestamp, SignInIP = IPAddress, Application;
+    | extend AccountObjectId = tolower(AccountObjectId)
+    | where isnotempty(AccountObjectId) and isnotempty(SessionId)
+    | project AccountObjectId, SessionId, DeviceCodeTime = Timestamp,
+        SignInIP = IPAddress, Application, ApplicationId;
 let SuspiciousDeviceCodeSessions =
     DeviceCodeInterrupts
-    | join kind=inner DeviceCodeSuccesses on AccountUpn, SessionId
+    | join kind=inner DeviceCodeSuccesses on AccountObjectId, SessionId
     | where DeviceCodeTime between (InterruptTime .. InterruptTime + 5m)
     | summarize DeviceCodeTime=max(DeviceCodeTime),
         FirstInterrupt=min(InterruptTime),
         SignInIPs=make_set(SignInIP, 10),
-        Apps=make_set(Application, 10)
-        by AccountUpn, SessionId;
+        Apps=make_set(Application, 10),
+        AppIds=make_set(ApplicationId, 10)
+        by AccountObjectId, AccountUpn, SessionId;
 CloudAppEvents
 | where Timestamp > ago(24h)
 | where ApplicationId == 20893 or Application == "Microsoft Exchange Online"
@@ -28,9 +33,10 @@ CloudAppEvents
     "Set-Mailbox", "New-TransportRule", "Set-TransportRule",
     "UpdateInboxRules", "MailItemsAccessed"
 )
-| extend AccountUpn = tolower(AccountId)
-| join kind=inner SuspiciousDeviceCodeSessions on AccountUpn
+| extend AccountObjectId = tolower(AccountObjectId)
+| where isnotempty(AccountObjectId)
+| join kind=inner SuspiciousDeviceCodeSessions on AccountObjectId
 | where Timestamp between (DeviceCodeTime .. DeviceCodeTime + Window)
-| project Timestamp, DeviceCodeTime, FirstInterrupt, AccountUpn, SessionId,
-    ActionType, IPAddress, UserAgent, RawEventData
+| project Timestamp, DeviceCodeTime, FirstInterrupt, AccountObjectId,
+    AccountUpn, SessionId, ActionType, IPAddress, UserAgent, RawEventData
 | order by Timestamp desc

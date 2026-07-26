@@ -1,50 +1,105 @@
 # Entra Device Code Phishing Detection Lab
 
-This companion lab supports the Nine Lives, Zero Trust blog post:
+This is the companion lab for:
 
 `Block Device Code Phishing in Entra Without Breaking Legit Workflows`
 
 Blog: https://nineliveszerotrust.com/blog/entra-device-code-phishing-sentinel/
 
-The lab focuses on detection engineering for Entra device code phishing without requiring you to run a real phishing flow. It also includes an optional **telemetry generator** that signs in a lab-owned user through a no-secret public client app, discards tokens immediately, and produces real Entra sign-in logs for tuning.
+The lab provides two Microsoft Sentinel analytics rules, three Defender XDR
+hunts, a synthetic replay, and an optional no-secret public client that creates
+lab-owned sign-in telemetry. It does not provide phishing infrastructure,
+capture credentials, access mail, or use issued tokens against a workload.
 
-## Threat Model
+## Validation boundary
 
-Device code phishing abuses the OAuth device authorization flow:
+The July 25, 2026 hardening revision was validated offline:
 
-1. Attacker starts a device-code flow from their client.
-2. Attacker sends the user a code and a link to the legitimate Microsoft device login page.
-3. User enters the code and satisfies the approval ceremony.
-4. Entra ID issues tokens to the attacker's waiting client.
-5. Attacker uses the token for mailbox, Graph, device registration, or SaaS access.
+- both Bicep templates compiled with Bicep 0.45.6;
+- every PowerShell entry point parsed under PowerShell 7;
+- the offline safety suite exercised foreign-rule and foreign-Graph-object
+  collisions and confirmed that they fail before mutation;
+- the canonical and bundled lab copies were reconciled byte for byte; and
+- the Sentinel template now loads the tracked KQL files directly.
 
-## Data Sources
+No tenant object was created or deleted, no device code was approved, and no
+live Entra, Sentinel, Log Analytics, or Defender query was run during that
+validation.
 
-| Platform | Tables | Requirement |
+## Safety model
+
+The lifecycle intentionally fails closed:
+
+- Sentinel rules use two fixed GUID resource IDs.
+- Sentinel deployment and removal require
+  `scripts/manage-sentinel-rules.ps1`.
+- Existing rule IDs are never adopted without the exact local provenance
+  manifest and ownership suffix.
+- A different rule using either display name blocks all mutations.
+- Rules deploy disabled unless `-EnableRules` is explicitly supplied.
+- Entra cleanup requires tenant ID, client ID, application object ID, service
+  principal object ID, and the deployment-specific Graph `uniqueName`.
+- Entra cleanup validates every object and ownership tag before the first
+  delete. Display names are informational only.
+- No script deletes users. The template does not create a user, so it cannot
+  prove ownership of one.
+- Native-command, REST, parsing, deployment, verification, and delete failures
+  are fatal. Expected OAuth polling states are the only retryable errors.
+
+## Prerequisites and permissions
+
+- PowerShell 7 or newer.
+- Azure CLI, the Azure CLI `log-analytics` extension for the checker, and Bicep
+  0.36.1 or newer.
+- A Sentinel-enabled Log Analytics workspace receiving Entra `SigninLogs`.
+- Permission such as Microsoft Sentinel Contributor on the target workspace
+  resource group.
+- For the optional app, permission to create an application and service
+  principal, such as `Application.ReadWrite.All` in a dedicated lab tenant,
+  plus permission to run an Azure subscription-scope deployment.
+- Azure CLI access to Microsoft Graph for exact object reads, the active-role
+  safety check, and optional cleanup.
+- Microsoft Entra ID P2 for `EntraIdSignInEvents` and the applicable Defender
+  products/connectors for `UrlClickEvents` and `CloudAppEvents`.
+
+The Microsoft Graph Bicep extension is still documented by Microsoft as
+preview. Review its current support terms before using it outside a disposable
+lab tenant:
+https://learn.microsoft.com/graph/templates/bicep/reference/overview
+
+## What is included
+
+| Surface | Files | Result |
 |---|---|---|
-| Microsoft Sentinel | `SigninLogs` | Entra sign-in logs routed to Log Analytics/Sentinel |
-| Defender for Office 365 Safe Links | `UrlClickEvents` | URL-click telemetry |
-| Defender for Cloud Apps | `CloudAppEvents` | Exchange, device-registration, and SaaS activity |
-| Microsoft Defender XDR | `EntraIdSignInEvents` | Microsoft Entra ID P2 data in advanced hunting |
+| Sentinel | `infra/sentinel-rules.bicep` and `kql/sentinel/*.kql` | Two scheduled rules, disabled by default |
+| Entra | `infra/lab-app.bicep` | Optional single-tenant public client and service principal, with no credentials |
+| Telemetry | `scripts/run-device-code-telemetry-test.ps1` | One lab-user device-code ceremony; issued tokens are identity-checked and discarded |
+| Verification | `scripts/check-device-code-telemetry.ps1` | Exact app/user-scoped `SigninLogs` and rule previews |
+| Cleanup | `scripts/manage-sentinel-rules.ps1` and `scripts/cleanup-device-code-lab-artifacts.ps1` | Exact, owner-verified cleanup only |
+| Defender XDR | `kql/defender-xdr/*.kql` | URL-click, mailbox-abuse, and device-registration hunts |
+| Replay | `kql/sample-data/device-code-phishing-replay.kql` | Neutral synthetic rows for query inspection |
 
-## What This Lab Deploys
+## Detection accuracy guardrails
 
-The lab has two deployment surfaces:
-
-| Surface | What Deploys | What Does Not Deploy |
-|---|---|---|
-| Microsoft Sentinel | Two scheduled analytics rules that run against `SigninLogs` | Defender XDR advanced hunting queries, because those depend on Defender tables |
-| Microsoft Entra ID | Optional no-secret public client app for lab-owned sign-in telemetry | Mail access, Graph permissions, delegated API permissions, client secrets, or phishing infrastructure |
-
-The companion KQL includes five detection layers, but only the two `SigninLogs` detections are Sentinel analytics rules in this repo. The URL-click, mailbox-abuse, and device-registration layers are Defender XDR advanced hunting queries because they rely on `UrlClickEvents`, `CloudAppEvents`, and `EntraIdSignInEvents`.
-
-## Accuracy Guardrails
-
-- `50199 -> 0` is a useful interrupt-to-success signal when it is joined with protocol, app/client, session, correlation, URL-click, or post-token context. It is not device-code proof by itself.
-- Legitimate Azure CLI and Azure PowerShell sign-ins can produce the same interrupt-to-success ceremony. Keep both app display names and app IDs in your allowlist.
-- Do not default-allow Microsoft Authentication Broker. Treat it as a sensitive exception that needs documented brokered-auth or device-registration scenarios, managed/compliant device controls where possible, trusted-location constraints, and device-registration monitoring.
-- `CloudAppEvents.AccountId` is not guaranteed to be a UPN in every tenant or connected app. Prefer object-ID joins when your data has the needed fields, or validate `AccountId` before relying on a UPN-style join.
-- `UrlClickEvents` depends on Safe Links telemetry. If Defender for Office 365 is not producing URL-click data, run the Sentinel-only rules and use the Defender XDR queries as patterns to adapt later.
+- `50199 -> 0` is a correlation signal, not proof of device-code phishing.
+  Join it with protocol, immutable app ID, non-empty correlation/session
+  context, URL-click timing, or post-token behavior.
+- Application display names are attacker-controlled. The default allowlist uses
+  only the well-known Azure CLI and Azure PowerShell application IDs.
+- Teams Rooms and other legitimate clients are not suppressed by display name.
+  Inventory the exact application IDs in your tenant before adding exceptions.
+- Microsoft Authentication Broker is not a default exception. Require a
+  documented broker/device-registration use case and compensating controls.
+- The Sentinel joins prefer `UserId` and fall back to normalized UPN only when
+  the object ID is absent.
+- The mailbox hunt joins `EntraIdSignInEvents.AccountObjectId` to
+  `CloudAppEvents.AccountObjectId`. It does not assume that
+  `CloudAppEvents.AccountId` is a UPN.
+- `UrlClickEvents` exposes an account UPN rather than an Entra object ID, so the
+  URL-click hunt must retain a UPN join. Validate aliases and guest identities.
+- Device-registration raw fields vary by tenant and connector. Validate that
+  `RawEventData.ObjectId` is the registering user's Entra object ID before
+  operationalizing that hunt.
 
 ## Queries
 
@@ -52,194 +107,281 @@ The companion KQL includes five detection layers, but only the two `SigninLogs` 
 
 | File | Purpose |
 |---|---|
-| `kql/sentinel/01-device-code-50199-to-success.kql` | Find `50199` interrupt followed by success |
-| `kql/sentinel/02-unapproved-device-code-client.kql` | Inventory and alert on unapproved device-code clients |
-| `kql/sentinel/05-device-code-inventory.kql` | Build the 30-day allowlist baseline |
+| `kql/sentinel/01-device-code-50199-to-success.kql` | Non-empty user/correlation join from 50199 to success |
+| `kql/sentinel/02-unapproved-device-code-client.kql` | Device-code-like events outside an immutable app-ID allowlist |
+| `kql/sentinel/05-device-code-inventory.kql` | 30-day client inventory for tuning |
 
 ### Defender XDR
 
 | File | Purpose |
 |---|---|
-| `kql/defender-xdr/01-url-click-to-device-code-auth.kql` | Correlate URL click telemetry with device-code sign-in events |
-| `kql/defender-xdr/02-post-token-mailbox-abuse.kql` | Correlate suspicious auth with Exchange mailbox activity |
-| `kql/defender-xdr/03-device-registration-after-device-code.kql` | Correlate suspicious auth with device registration |
+| `kql/defender-xdr/01-url-click-to-device-code-auth.kql` | URL click, interrupt, and later success in bounded windows |
+| `kql/defender-xdr/02-post-token-mailbox-abuse.kql` | Object-ID correlation to Exchange activity |
+| `kql/defender-xdr/03-device-registration-after-device-code.kql` | Object-ID correlation to tenant-validated registration fields |
 
-### Sample Data
+### Synthetic replay
 
-| File | Purpose |
-|---|---|
-| `kql/sample-data/device-code-phishing-replay.kql` | Replay a synthetic chain for query validation |
+Run `kql/sample-data/device-code-phishing-replay.kql` in a KQL-capable editor.
+The replay contains documentation-only IP ranges, `contoso.com` identities, and
+non-production GUIDs. It does not write data.
 
-### Optional Telemetry Generator
+## Sentinel rule identities
 
-| File | Purpose |
-|---|---|
-| `infra/lab-app.bicep` | Creates the no-secret public client app used only for lab sign-in telemetry |
-| `scripts/run-device-code-telemetry-test.ps1` | Generates a lab-owned device-code sign-in ceremony and discards tokens |
-| `scripts/check-device-code-telemetry.ps1` | Checks `SigninLogs`, rule correlation output, and optional Sentinel incidents |
-| `scripts/cleanup-device-code-lab-artifacts.ps1` | Safely previews or removes the lab app, service principal, optional lab user, and optional TAP provisioner |
-
-Requires PowerShell 7+ for the telemetry scripts. Run them from `pwsh`; the scripts include `#requires -Version 7.0`.
-
-## Suggested Analytics Rules
-
-| Rule | Severity | MITRE |
+| Rule | Immutable resource ID | Default |
 |---|---|---|
-| LAB - Device Code - 50199 Followed by Success | High | T1566.002, T1550.001 |
-| LAB - Device Code - Unapproved Client | Medium | T1078, T1550.001 |
-| LAB - URL Click Followed by Device Code Auth | High | T1566.002 |
-| LAB - Mailbox Abuse After Device Code Auth | High | T1114, T1098 |
-| LAB - Device Registration After Device Code Auth | High | T1098 |
+| LAB - Device Code - 50199 Followed by Success | `45543375-c81a-56ab-b020-b3cc3bcf652e` | Disabled |
+| LAB - Device Code - Unapproved Client | `0d879be9-2084-5bee-bf5b-8effbf4d8c64` | Disabled |
 
-## Deploy Sentinel Rules
+These GUIDs are scoped under the selected workspace. Do not change them to make
+a collision disappear. A collision means the lifecycle script must stop so an
+operator can investigate.
 
-The Sentinel-native rules deploy from `SigninLogs`:
+## Deploy Sentinel rules safely
 
-```bash
-az deployment group create \
-  --resource-group sentinel-urbac-lab-rg \
-  --template-file infra/sentinel-rules.bicep \
-  --parameters workspaceName=sentinel-urbac-lab-law
-```
-
-The Defender XDR hunts remain advanced hunting queries because they rely on `UrlClickEvents`, `EntraIdSignInEvents`, and `CloudAppEvents`.
-
-## Optional: Run It and See Telemetry
-
-This path turns the lab from "hunt and harden" into "run it, see telemetry, tune detection."
-
-Important safety boundaries:
-
-- Use a lab-only, non-privileged user.
-- Do not run this against a real victim.
-- The script does not capture, print, store, or use access or refresh tokens.
-- Tokens are discarded in memory immediately after issuance.
-- The script refuses to run when it detects high-privilege directory roles such as Global Administrator or Privileged Role Administrator.
-- The role check covers active directory-role membership. It does not prove a user has no inactive PIM eligibility, so keep the test account boring and non-admin.
-- The script may call Microsoft Graph through your existing Azure CLI context for the active-role safety check. It does not use the issued device-code tokens to access mail, Graph, or any workload resource.
-
-### 1. Create the lab public client app
-
-`infra/lab-app.bicep` uses the Microsoft Graph Bicep extension dynamic types to create a no-secret, single-tenant public client application. The Graph extension uses Bicep extensibility features, so expect the experimental/extension tooling path rather than a plain ARM resource provider deployment. Creating this app changes tenant state and requires app-registration permissions such as `Application.ReadWrite.All`.
-
-```bash
-az deployment sub create \
-  --location eastus \
-  --template-file infra/lab-app.bicep \
-  --parameters uniqueName=nine-lives-device-code-telemetry-lab \
-  --query properties.outputs.clientId.value -o tsv
-```
-
-Save the output as `DEVICE_CODE_LAB_CLIENT_ID`.
+Set the exact target:
 
 ```powershell
-$env:DEVICE_CODE_LAB_CLIENT_ID = "<client-id-from-deployment>"
-$env:DEVICE_CODE_LAB_USER = "<lab-user-upn>"
-$env:AZURE_TENANT_ID = "<tenant-id>"
+$env:AZURE_SUBSCRIPTION_ID = "<subscription-guid>"
+$env:SENTINEL_RESOURCE_GROUP = "rg-device-code-lab"
+$env:SENTINEL_WORKSPACE_NAME = "law-device-code-lab"
 ```
 
-### 2. Generate lab-owned sign-in telemetry
-
-The script intentionally polls for about 30 seconds before asking you to approve the code. That poll-first pattern is what makes Entra more likely to emit the `50199` interrupt before the successful sign-in. `50199` is a correlation signal, not device-code proof by itself; use it with protocol, app/client, session, correlation, or post-token behavior.
-
-From the companion repo root:
+Run a read-only ownership and collision preflight:
 
 ```powershell
-.\scripts\run-device-code-telemetry-test.ps1 -Confirm
+./scripts/manage-sentinel-rules.ps1
 ```
 
-Expected output:
+The first preflight must find neither deterministic rule ID nor either display
+name. It does not create the provenance manifest.
 
-```text
-RunId:     LAB-DC-2026-04-25T20-45-12Z
-UserAgent: NineLivesLab/1.0 (run:LAB-DC-2026-04-25T20-45-12Z)
-
-Do NOT approve yet. The script will poll first to generate 50199/CmsiInterrupt-style telemetry.
-Verification URL: https://microsoft.com/devicelogin
-User code:        ABCD-EFGH
-
-Now approve the sign-in with your LAB account only.
-Telemetry test completed. Tokens were discarded without use.
-```
-
-### 3. Check ingestion and rule correlation
-
-SigninLogs and Sentinel analytics can lag. Start with a two-hour lookback and rerun after a few minutes if the first query is empty.
-The generator prints a run ID for your terminal transcript, but Entra may record the browser approval user-agent instead of the script user-agent. For deterministic checks, pass the lab app client ID and lab user UPN too. The checker treats that app/user pair as a fallback scope, not as proof that every row carried the run ID.
+Deploy both rules in the safe disabled state:
 
 ```powershell
-$env:SENTINEL_WORKSPACE_ID = "<workspace-guid>"
-$env:SENTINEL_RESOURCE_GROUP = "sentinel-urbac-lab-rg"
-$env:SENTINEL_WORKSPACE_NAME = "sentinel-urbac-lab-law"
+./scripts/manage-sentinel-rules.ps1 -Execute -Confirm
+```
 
-.\scripts\check-device-code-telemetry.ps1 `
-  -RunId "LAB-DC-2026-04-25T20-45-12Z" `
-  -ClientId $env:DEVICE_CODE_LAB_CLIENT_ID `
-  -UserPrincipalName $env:DEVICE_CODE_LAB_USER `
+The script writes `.device-code-sentinel-state.json` before the first cloud
+write, deploys the two rules, then rereads Sentinel and verifies ID, kind,
+display name, ownership suffix, and disabled state. Keep that file. It is the
+local proof that permits an owned rerun and partial-cleanup recovery. Do not
+copy it to another subscription, tenant, resource group, or workspace.
+
+After validating `SigninLogs` availability, running both KQL files manually,
+and tuning immutable app-ID exceptions, explicitly enable the rules:
+
+```powershell
+./scripts/manage-sentinel-rules.ps1 -EnableRules -Execute -Confirm
+```
+
+Omitting `-EnableRules` on a later deployment returns both rules to the safe
+disabled state. `-WhatIf` can be combined with `-Execute` to exercise
+ShouldProcess without writing.
+
+Direct deployment of `infra/sentinel-rules.bicep` is unsupported because Bicep
+alone cannot distinguish an owned resource from a foreign object already using
+the same GUID. The lifecycle script supplies the deployment identity only after
+the manifest and collision checks pass.
+
+## Remove Sentinel rules safely
+
+Preview exact cleanup:
+
+```powershell
+./scripts/manage-sentinel-rules.ps1 -Action Remove
+```
+
+Remove only the two manifest-owned IDs:
+
+```powershell
+./scripts/manage-sentinel-rules.ps1 -Action Remove -Execute -Confirm
+```
+
+Every existing target is validated before the first delete. Missing owned IDs
+are treated as already removed so a partial prior failure can be recovered.
+Foreign IDs, names, kinds, or ownership suffixes stop the entire preflight.
+After cleanup, the manifest is retained with `status: removed` as an audit and
+recovery record.
+
+## Optional Entra telemetry app
+
+### 1. Create a deployment-specific alternate key
+
+Microsoft Graph Bicep applications are upserted by `uniqueName`. Never use a
+shared static value. Generate a fresh GUID-suffixed value and retain it:
+
+```powershell
+$appDeploymentId = [guid]::NewGuid()
+$labUniqueName = "nine-lives-device-code-telemetry-lab-$appDeploymentId"
+$deploymentName = "nlzt-device-code-app-$($appDeploymentId.ToString('N').Substring(0, 8))"
+```
+
+### 2. Deploy and capture every immutable output
+
+This is a live tenant write:
+
+```powershell
+$deployment = az deployment sub create `
+  --name $deploymentName `
+  --location eastus `
+  --template-file ./infra/lab-app.bicep `
+  --parameters uniqueName=$labUniqueName `
+  --only-show-errors `
+  -o json | ConvertFrom-Json
+
+if ($LASTEXITCODE -ne 0) {
+  throw "The Graph Bicep deployment failed."
+}
+
+$outputs = $deployment.properties.outputs
+$env:DEVICE_CODE_LAB_CLIENT_ID = $outputs.clientId.value
+$env:DEVICE_CODE_LAB_APP_OBJECT_ID = $outputs.applicationObjectId.value
+$env:DEVICE_CODE_LAB_SP_OBJECT_ID = $outputs.servicePrincipalId.value
+$env:DEVICE_CODE_LAB_UNIQUE_NAME = $outputs.uniqueName.value
+$env:AZURE_TENANT_ID = "<tenant-guid>"
+```
+
+Retain the deployment name and those five values until cleanup is verified.
+They are identifiers, not credentials, but they are required to prevent
+name-based selection. The template stamps both Graph objects with the fixed
+owner tag and the deployment-specific `uniqueName` tag.
+
+The template creates:
+
+- one `AzureADMyOrg` application;
+- one public-client redirect URI (`http://localhost`);
+- one service principal; and
+- no password credential, certificate credential, application permission,
+  delegated API permission, or admin consent.
+
+### 3. Generate lab-owned telemetry
+
+Sign Azure CLI in as the same dedicated non-admin user that will approve the
+browser code:
+
+```powershell
+az login --tenant $env:AZURE_TENANT_ID
+./scripts/run-device-code-telemetry-test.ps1 -Confirm
+```
+
+The generator:
+
+1. verifies the active Azure CLI tenant and Graph user;
+2. blocks any active directory-role assignment unless the operator explicitly
+   uses `-SkipPrivilegedRoleCheck`;
+3. requests only `openid profile`;
+4. polls only through the expected `authorization_pending` and `slow_down`
+   states;
+5. decodes the issued ID token only to compare tenant and user object ID with
+   the already verified Azure CLI lab user; and
+6. clears the token response without calling mail, Graph, or another workload.
+
+The active-role query cannot prove that the user has no inactive PIM
+eligibility. The post-issuance identity comparison also cannot stop a wrong
+person from entering the code; it makes that mismatch fatal and discards the
+response. Use a boring, dedicated lab account.
+
+### 4. Check ingestion
+
+Set the exact workspace, app, and user scope:
+
+```powershell
+$env:SENTINEL_WORKSPACE_ID = "<log-analytics-workspace-guid>"
+$env:DEVICE_CODE_LAB_USER = "device-code-lab-user@contoso.com"
+
+./scripts/check-device-code-telemetry.ps1 `
+  -RunId "<run-id>" `
   -LookbackHours 2
 ```
 
-The check script prints:
+The checker refuses a tenant-wide fallback. It requires the client ID and user
+UPN, preserves KQL line breaks so `//` comments cannot break the query, derives
+both previews from the tracked Sentinel KQL, and optionally lists incidents
+whose `relatedAnalyticRuleIds` contain the exact two deterministic rule IDs.
+Provide both resource group and workspace name to enable incident lookup.
 
-1. Raw `SigninLogs` telemetry scoped to the run ID, or to the lab app and lab user when the browser row does not retain the run ID.
-2. The Rule 1 `50199 -> success` correlation preview.
-3. The Rule 2 unapproved-client preview.
-4. Recent Sentinel incidents with `Device Code` in the title when resource group/workspace names are set.
+Empty results are not command success failures. Ingestion and scheduled-rule
+execution can lag, and disabled rules never create incidents.
 
-Incident lookup is advisory. Empty incident output means no matching incident has materialized yet; it does not invalidate a `SigninLogs` hit or the rule correlation preview.
+## Remove the optional Entra app
 
-### Cleanup the lab app
+The cleanup helper never searches by display name, UPN, or collection filter.
+It reads the exact object IDs, validates all fixed and deployment-specific
+tags, validates the app/client relationship, and rejects objects containing
+credentials the template never creates.
 
-If you deployed the optional public client app, preview cleanup first:
-
-```powershell
-.\scripts\cleanup-device-code-lab-artifacts.ps1 -ClientId $env:DEVICE_CODE_LAB_CLIENT_ID
-```
-
-Then run it with explicit execution enabled. PowerShell will still ask for confirmation before each delete:
-
-```powershell
-.\scripts\cleanup-device-code-lab-artifacts.ps1 -ClientId $env:DEVICE_CODE_LAB_CLIENT_ID -Execute
-```
-
-If you also created a disposable lab user, pass an exact identifier for that user:
+Preview:
 
 ```powershell
-.\scripts\cleanup-device-code-lab-artifacts.ps1 `
-  -ClientId $env:DEVICE_CODE_LAB_CLIENT_ID `
-  -LabUserPrincipalName "device-code-lab-user@contoso.com" `
-  -Execute
+./scripts/cleanup-device-code-lab-artifacts.ps1
 ```
 
-If you created a temporary user only to provision a Temporary Access Pass, include that exact user too:
+Execute after reviewing every ID:
 
 ```powershell
-.\scripts\cleanup-device-code-lab-artifacts.ps1 `
-  -ClientId $env:DEVICE_CODE_LAB_CLIENT_ID `
-  -LabUserPrincipalName "device-code-lab-user@contoso.com" `
-  -TapProvisionerPrincipalName "tap-provisioner@contoso.com" `
-  -Execute
+./scripts/cleanup-device-code-lab-artifacts.ps1 -Execute -Confirm
 ```
 
-The helper defaults to dry-run mode, refuses ambiguous display-name matches, and deletes the service principal only when it belongs to the matched lab app or is explicitly selected. Delete lab users only when they were created solely for this lab.
+The exact service principal is deleted first. If that delete fails, the
+application is left untouched. Any later failure is fatal and is reported
+without being converted into success.
 
-## Triage
+User cleanup is deliberately outside this script. If you created a disposable
+user or Temporary Access Pass provisioner manually, review and remove it
+manually by immutable object ID in the correct tenant. The lab cannot attach
+credible provenance to an object it did not create.
 
-When a rule fires:
+## Suggested MITRE mapping
 
-1. Revoke sign-in sessions for the user.
-2. Check Entra ID Protection user risk and sign-in risk.
-3. Review mailbox rules, forwarding, delegates, and transport rules.
-4. Review OAuth app grants and newly registered devices.
-5. Search payroll, finance, HR, and Workday-style app events after the sign-in.
-6. Convert confirmed false positives into a documented device-code allowlist.
+| Rule | Severity | Techniques |
+|---|---|---|
+| 50199 followed by success | High | T1566.002, T1550.001 |
+| Unapproved device-code client | Medium | T1078, T1550.001 |
 
-## Notes
+## Response checklist
 
-- Do not blindly block device code flow before inventorying legitimate dependencies.
-- Use Conditional Access report-only mode first.
-- `50199 -> success` is a correlation signal, not a complete verdict.
-- Legitimate Azure CLI sign-ins can produce `50199 -> success`; keep both app display names and app IDs in your allowlist. In Entra logs, Azure CLI commonly appears as `Microsoft Azure CLI`.
-- Treat Microsoft Authentication Broker as a sensitive exception, not a default allowlist entry. Add it only for documented brokered-auth or device-registration scenarios with extra controls and monitoring.
-- Post-auth behavior is where device code phishing turns into business impact.
-- The telemetry generator creates authentication telemetry only; it does not simulate URL clicks, mailbox access, or device registration.
+1. Revoke the user's sessions.
+2. Review Entra risk, Conditional Access results, and authentication details.
+3. Review inbox rules, forwarding, delegates, transport rules, and mail access.
+4. Review new devices, OAuth grants, app consent, and authentication methods.
+5. Search finance, payroll, HR, file, and SaaS events after the sign-in.
+6. Convert verified false positives into immutable app-ID exceptions with an
+   owner, reason, and review date.
+
+## Cost and licensing
+
+The app registration has no direct compute charge. Costs come from existing Log
+Analytics/Sentinel ingestion and retention, plus the Defender and Entra
+licenses needed for optional advanced-hunting tables. Run the inventory query
+before enabling scheduled rules and confirm the expected query volume.
+
+## Local validation
+
+```powershell
+az bicep build --file ./infra/lab-app.bicep --stdout | Out-Null
+az bicep build --file ./infra/sentinel-rules.bicep --stdout | Out-Null
+python -m unittest discover -s tests -v
+```
+
+The repository workflow performs both Bicep builds, parses every PowerShell
+script, and runs the offline safety suite. The suite has no third-party Python
+dependency.
+
+## Troubleshooting
+
+- **Graph extension restore fails:** verify Bicep 0.36.1 or newer and access to
+  `mcr.microsoft.com`.
+- **App deployment reports a `uniqueName` conflict:** stop. Generate a new
+  GUID-suffixed value for a new lab deployment; do not adopt the existing app.
+- **Sentinel preflight reports an ID or display-name collision:** stop and
+  inspect the foreign rule. Do not change the owned GUIDs to bypass the check.
+- **Provenance manifest is missing:** deploy can proceed only when neither rule
+  ID nor display name exists. Removal requires the exact manifest.
+- **Role check fails:** restore Microsoft Graph read access or independently
+  verify a dedicated non-admin user before explicitly using the bypass.
+- **No `50199` row:** the poll-first sequence improves observability but cannot
+  guarantee a particular tenant error code.
+- **No incident:** rules are disabled by default. First verify raw `SigninLogs`,
+  then the scoped query previews, then explicit rule enablement and scheduling.
+- **Defender hunt has no rows:** verify that the named product, license,
+  connector, and table are present before treating an empty result as evidence.

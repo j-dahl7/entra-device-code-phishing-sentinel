@@ -1,24 +1,44 @@
-let Window = 7m;
+let ClickToSigninWindow = 7m;
+let InterruptToSuccessWindow = 5m;
 let SuspiciousClicks =
     UrlClickEvents
     | where Timestamp > ago(24h)
     | extend ClickedThrough = tolower(tostring(IsClickedThrough)) in ("true", "1")
     | where ActionType in ("ClickAllowed", "UrlScanInProgress", "UrlErrorPage")
         or ClickedThrough
-        or UrlChain has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
+    | where UrlChain has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
         or Url has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
-    | project ClickTime = Timestamp, AccountUpn = tolower(AccountUpn),
+    | extend AccountUpn = tolower(AccountUpn)
+    | where isnotempty(AccountUpn)
+    | project ClickTime = Timestamp, AccountUpn,
         Url, UrlChain, NetworkMessageId, ActionType, ClickedThrough;
-let DeviceCodeSignins =
+let DeviceCodeInterrupts =
     EntraIdSignInEvents
     | where Timestamp > ago(24h)
-    | where ErrorCode in (0, 50199)
-    | summarize ErrorCodes=make_set(ErrorCode), FirstSignin=min(Timestamp), LastSignin=max(Timestamp),
-        IPs=make_set(IPAddress, 10), Apps=make_set(Application, 10), RiskLevels=make_set(RiskLevelAggregated, 10)
-        by AccountUpn=tolower(AccountUpn), SessionId
-    | where ErrorCodes has_all (0, 50199);
+    | where ErrorCode == 50199
+    | extend AccountUpn = tolower(AccountUpn)
+    | where isnotempty(AccountUpn) and isnotempty(SessionId)
+    | project InterruptTime = Timestamp, AccountUpn, SessionId;
+let DeviceCodeSuccesses =
+    EntraIdSignInEvents
+    | where Timestamp > ago(24h)
+    | where ErrorCode == 0
+    | extend AccountUpn = tolower(AccountUpn)
+    | where isnotempty(AccountUpn) and isnotempty(SessionId)
+    | project SuccessTime = Timestamp, AccountUpn, SessionId,
+        IPAddress, Application, ApplicationId, RiskLevelAggregated;
+let DeviceCodeSignins =
+    DeviceCodeInterrupts
+    | join kind=inner DeviceCodeSuccesses on AccountUpn, SessionId
+    | where SuccessTime between (InterruptTime .. InterruptTime + InterruptToSuccessWindow)
+    | summarize FirstInterrupt=min(InterruptTime), FirstSignin=min(SuccessTime),
+        LastSignin=max(SuccessTime), IPs=make_set(IPAddress, 10),
+        Apps=make_set(Application, 10), AppIds=make_set(ApplicationId, 10),
+        RiskLevels=make_set(RiskLevelAggregated, 10)
+        by AccountUpn, SessionId;
 SuspiciousClicks
 | join kind=inner DeviceCodeSignins on AccountUpn
-| where FirstSignin between (ClickTime .. ClickTime + Window)
-| project FirstSignin, ClickTime, AccountUpn, Url, UrlChain, ActionType, ClickedThrough,
-    ErrorCodes, IPs, Apps, RiskLevels, NetworkMessageId, SessionId
+| where FirstSignin between (ClickTime .. ClickTime + ClickToSigninWindow)
+| project FirstSignin, FirstInterrupt, ClickTime, AccountUpn, Url, UrlChain,
+    ActionType, ClickedThrough, IPs, Apps, AppIds, RiskLevels,
+    NetworkMessageId, SessionId
