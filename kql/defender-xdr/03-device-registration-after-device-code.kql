@@ -3,29 +3,40 @@ let DeviceCodeInterrupts =
     EntraIdSignInEvents
     | where Timestamp > ago(24h)
     | where ErrorCode == 50199
-    | project AccountUpn = tolower(AccountUpn), SessionId,
+    | extend AccountObjectId = tolower(AccountObjectId)
+    | where isnotempty(AccountObjectId) and isnotempty(SessionId)
+    | project AccountObjectId, AccountUpn = tolower(AccountUpn), SessionId,
         InterruptTime = Timestamp;
 let DeviceCodeSuccesses =
     EntraIdSignInEvents
     | where Timestamp > ago(24h)
     | where ErrorCode == 0
-    | project AccountUpn = tolower(AccountUpn), SessionId,
-        DeviceCodeTime = Timestamp, SignInIP = IPAddress, Application;
+    | extend AccountObjectId = tolower(AccountObjectId)
+    | where isnotempty(AccountObjectId) and isnotempty(SessionId)
+    | project AccountObjectId, SessionId, DeviceCodeTime = Timestamp,
+        SignInIP = IPAddress, Application, ApplicationId;
 let SuspiciousDeviceCodeSessions =
     DeviceCodeInterrupts
-    | join kind=inner DeviceCodeSuccesses on AccountUpn, SessionId
+    | join kind=inner DeviceCodeSuccesses on AccountObjectId, SessionId
     | where DeviceCodeTime between (InterruptTime .. InterruptTime + 5m)
     | summarize DeviceCodeTime=max(DeviceCodeTime),
         FirstInterrupt=min(InterruptTime),
         SignInIPs=make_set(SignInIP, 10),
-        Apps=make_set(Application, 10)
-        by AccountUpn, SessionId;
+        Apps=make_set(Application, 10),
+        AppIds=make_set(ApplicationId, 10)
+        by AccountObjectId, AccountUpn, SessionId;
 CloudAppEvents
 | where Timestamp > ago(24h)
 | where AccountDisplayName == "Device Registration Service"
-| extend AccountUpn = tolower(tostring(RawEventData.ObjectId))
-| join kind=inner SuspiciousDeviceCodeSessions on AccountUpn
+// Validate this tenant-specific raw-field mapping before operationalizing the hunt.
+| extend RegistrationUserObjectId = tolower(tostring(RawEventData.ObjectId))
+| where isnotempty(RegistrationUserObjectId)
+| join kind=inner SuspiciousDeviceCodeSessions
+    on $left.RegistrationUserObjectId == $right.AccountObjectId
 | where Timestamp between (DeviceCodeTime .. DeviceCodeTime + Window)
-| extend DeviceName = tostring(parse_json(tostring(RawEventData.ModifiedProperties))[1].NewValue)
-| project Timestamp, DeviceCodeTime, FirstInterrupt, AccountUpn, SessionId,
-    DeviceName, ActionType, IPAddress, RawEventData
+| project Timestamp, DeviceCodeTime, FirstInterrupt,
+    UserAccountObjectId = RegistrationUserObjectId,
+    AccountUpn, SessionId, ActionType, IPAddress,
+    RegisteredObjectName = ObjectName, RegisteredObjectId = ObjectId,
+    RawEventData
+| order by Timestamp desc

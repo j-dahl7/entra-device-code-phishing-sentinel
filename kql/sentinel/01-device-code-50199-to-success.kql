@@ -1,11 +1,6 @@
 let Lookback = 15m;
 let Window = 5m;
-let ApprovedDeviceCodeApps = dynamic([
-    "Microsoft Azure CLI",
-    "Azure CLI",
-    "Microsoft Azure PowerShell",
-    "Microsoft Teams Rooms"
-]);
+// Only immutable application IDs suppress alerts. Display names are attacker-controlled.
 let ApprovedDeviceCodeAppIds = dynamic([
     "04b07795-8ddb-461a-bbee-02f9e1bf7b46", // Microsoft Azure CLI
     "1950a258-227b-4e31-a9cf-717495945fc2"  // Microsoft Azure PowerShell
@@ -15,25 +10,34 @@ let Interrupts =
     | where TimeGenerated > ago(Lookback)
     | extend Result = tostring(ResultType)
     | where Result == "50199" or ResultDescription has "50199"
+    | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
+    | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
+    | where isnotempty(UserKey) and isnotempty(CorrelationId)
     | extend SessionId = tostring(column_ifexists("SessionId", ""))
-    | project InterruptTime = TimeGenerated, UserPrincipalName,
+    | project InterruptTime = TimeGenerated, UserKey, UserPrincipalName,
         CorrelationId, SessionId, IPAddress, AppDisplayName, AppId, UserAgent;
 let Successes =
     SigninLogs
     | where TimeGenerated > ago(Lookback)
     | extend Result = tostring(ResultType)
     | where Result == "0"
+    | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
+    | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
+    | where isnotempty(UserKey) and isnotempty(CorrelationId)
     | extend SessionId = tostring(column_ifexists("SessionId", ""))
-    | project SuccessTime = TimeGenerated, UserPrincipalName,
-        CorrelationId, SessionId, SuccessIP = IPAddress,
-        SuccessApp = AppDisplayName, SuccessAppId = AppId, SuccessUserAgent = UserAgent;
+    | project SuccessTime = TimeGenerated, UserKey, CorrelationId,
+        SuccessSessionId = SessionId, SuccessIP = IPAddress,
+        SuccessApp = AppDisplayName, SuccessAppId = AppId,
+        SuccessUserAgent = UserAgent;
 Interrupts
-| join kind=inner Successes on UserPrincipalName, CorrelationId
+| join kind=inner Successes on UserKey, CorrelationId
 | where SuccessTime between (InterruptTime .. InterruptTime + Window)
-| where AppDisplayName !in~ (ApprovedDeviceCodeApps)
-    and SuccessApp !in~ (ApprovedDeviceCodeApps)
-    and AppId !in~ (ApprovedDeviceCodeAppIds)
-    and SuccessAppId !in~ (ApprovedDeviceCodeAppIds)
+| extend EffectiveAppId = iff(isnotempty(SuccessAppId), SuccessAppId, AppId)
+| where isempty(EffectiveAppId) or EffectiveAppId !in~ (ApprovedDeviceCodeAppIds)
+| extend AccountName = tostring(split(UserPrincipalName, "@")[0]),
+    AccountUPNSuffix = tostring(split(UserPrincipalName, "@")[1])
 | project TimeGenerated = SuccessTime, InterruptTime, UserPrincipalName,
-    AppDisplayName, AppId, IPAddress, SuccessIP, UserAgent, SuccessUserAgent,
-    CorrelationId, SessionId
+    AccountName, AccountUPNSuffix,
+    AppDisplayName, AppId, SuccessApp, SuccessAppId, EffectiveAppId,
+    IPAddress, SuccessIP, UserAgent, SuccessUserAgent,
+    CorrelationId, SessionId, SuccessSessionId

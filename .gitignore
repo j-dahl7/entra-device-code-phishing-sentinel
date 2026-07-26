@@ -10,6 +10,10 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# Exact local deployment provenance (never commit or share between targets)
+.device-code-sentinel-state.json
+.device-code-sentinel-state.json.tmp.*
+
 # Azure / local test output
 *.json.tmp
 *.bak

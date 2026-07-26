@@ -1,9 +1,4 @@
-let ApprovedDeviceCodeApps = dynamic([
-    "Microsoft Azure CLI",
-    "Azure CLI",
-    "Microsoft Azure PowerShell",
-    "Microsoft Teams Rooms"
-]);
+// Only immutable application IDs suppress alerts. Display names are attacker-controlled.
 let ApprovedDeviceCodeAppIds = dynamic([
     "04b07795-8ddb-461a-bbee-02f9e1bf7b46", // Microsoft Azure CLI
     "1950a258-227b-4e31-a9cf-717495945fc2"  // Microsoft Azure PowerShell
@@ -21,22 +16,29 @@ let Interrupts =
     | where TimeGenerated > ago(Lookback)
     | extend Result = tostring(ResultType)
     | where Result == "50199" or ResultDescription has "50199"
-    | project InterruptTime = TimeGenerated, UserPrincipalName, CorrelationId;
+    | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
+    | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
+    | where isnotempty(UserKey) and isnotempty(CorrelationId)
+    | project InterruptTime = TimeGenerated, UserKey, CorrelationId;
 let CorrelatedSuccesses =
     SigninLogs
     | where TimeGenerated > ago(Lookback)
     | extend Result = tostring(ResultType)
     | where Result == "0"
-    | project SuccessTime = TimeGenerated, UserPrincipalName, CorrelationId,
-        IPAddress, AppDisplayName, AppId;
+    | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
+    | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
+    | where isnotempty(UserKey) and isnotempty(CorrelationId)
+    | project SuccessTime = TimeGenerated, UserKey, UserPrincipalName,
+        CorrelationId, IPAddress, AppDisplayName, AppId;
 let DeviceCodeLikeEvents =
     Interrupts
-    | join kind=inner CorrelatedSuccesses on UserPrincipalName, CorrelationId
+    | join kind=inner CorrelatedSuccesses on UserKey, CorrelationId
     | where SuccessTime between (InterruptTime .. InterruptTime + Window)
-    | project TimeGenerated = SuccessTime, UserPrincipalName, IPAddress, AppDisplayName, AppId;
+    | project TimeGenerated = SuccessTime, UserPrincipalName,
+        IPAddress, AppDisplayName, AppId;
 union DirectDeviceCodeEvents, DeviceCodeLikeEvents
-| where AppDisplayName !in~ (ApprovedDeviceCodeApps)
-    and AppId !in~ (ApprovedDeviceCodeAppIds)
+| distinct TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName, AppId
+| where isempty(AppId) or AppId !in~ (ApprovedDeviceCodeAppIds)
 | summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
     Attempts=count(), Users=dcount(UserPrincipalName), IPs=dcount(IPAddress),
     SampleUsers=make_set(UserPrincipalName, 10), SampleIPs=make_set(IPAddress, 10)
