@@ -39,7 +39,7 @@ resource ruleDeviceCode50199ToSuccess 'Microsoft.SecurityInsights/alertRules@202
     enabled: enableRules
     query: loadTextContent('../kql/sentinel/01-device-code-50199-to-success.kql')
     queryFrequency: 'PT15M'
-    queryPeriod: 'PT15M'
+    queryPeriod: 'PT30M'
     triggerOperator: 'GreaterThan'
     triggerThreshold: 0
     suppressionDuration: 'PT1H'

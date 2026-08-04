@@ -1,4 +1,4 @@
-let Lookback = 15m;
+let Lookback = 30m;
 let Window = 5m;
 // Only immutable application IDs suppress alerts. Display names are attacker-controlled.
 let ApprovedDeviceCodeAppIds = dynamic([
