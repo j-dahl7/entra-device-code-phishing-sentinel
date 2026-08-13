@@ -6,8 +6,13 @@ let SuspiciousClicks =
     | extend ClickedThrough = tolower(tostring(IsClickedThrough)) in ("true", "1")
     | where ActionType in ("ClickAllowed", "UrlScanInProgress", "UrlErrorPage")
         or ClickedThrough
-    | where UrlChain has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
-        or Url has_any ("microsoft.com/devicelogin", "login.microsoftonline.com/common/oauth2/deviceauth")
+    // URL paths contain punctuation, so use substring matching instead of
+    // term-index matching, which tokenizes these values and is not a reliable
+    // full-path predicate.
+    | where tostring(UrlChain) contains "microsoft.com/devicelogin"
+        or tostring(UrlChain) contains "login.microsoftonline.com/common/oauth2/deviceauth"
+        or Url contains "microsoft.com/devicelogin"
+        or Url contains "login.microsoftonline.com/common/oauth2/deviceauth"
     | extend AccountUpn = tolower(AccountUpn)
     | where isnotempty(AccountUpn)
     | project ClickTime = Timestamp, AccountUpn,

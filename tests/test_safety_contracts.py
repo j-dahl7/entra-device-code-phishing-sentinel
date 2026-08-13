@@ -106,6 +106,19 @@ class StaticSafetyContractTests(unittest.TestCase):
                 self.assertIn("ApprovedDeviceCodeAppIds", source)
                 self.assertIn("Display names are attacker-controlled", source)
 
+    def test_url_click_hunt_matches_complete_url_paths_as_substrings(self):
+        source = read(
+            KQL / "defender-xdr" / "01-url-click-to-device-code-auth.kql"
+        )
+        self.assertNotIn("has_any", source)
+        self.assertEqual(source.count('contains "microsoft.com/devicelogin"'), 2)
+        self.assertEqual(
+            source.count(
+                'contains "login.microsoftonline.com/common/oauth2/deviceauth"'
+            ),
+            2,
+        )
+
     def test_defender_joins_use_immutable_object_ids_where_available(self):
         mailbox = read(KQL / "defender-xdr" / "02-post-token-mailbox-abuse.kql")
         registration = read(
