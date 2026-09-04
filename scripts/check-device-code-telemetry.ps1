@@ -136,12 +136,15 @@ function Get-ScopedRuleQuery {
     throw ('Tracked Sentinel KQL file not found: {0}' -f $Path)
   }
   $source = Get-Content -LiteralPath $Path -Raw
-  $lookbackMatches = [regex]::Matches($source, '(?m)^let Lookback = (15m|1h);\r?$')
+  # Match one trusted, positive minute/hour declaration, including Rule 1's
+  # tracked 30m window. Use the same matcher to validate and replace it.
+  $lookbackPattern = '(?m)^let Lookback = [1-9][0-9]*[mh];\r?$'
+  $lookbackMatches = [regex]::Matches($source, $lookbackPattern)
   if ($lookbackMatches.Count -ne 1) {
     throw ('Expected exactly one supported Lookback declaration in {0}; found {1}.' -f $Path, $lookbackMatches.Count)
   }
 
-  $source = [regex]::Replace($source, '(?m)^let Lookback = (15m|1h);\r?$', ('let Lookback = {0}h;' -f $LookbackHours))
+  $source = [regex]::Replace($source, $lookbackPattern, ('let Lookback = {0}h;' -f $LookbackHours))
   $source = [regex]::Replace($source, '\bSigninLogs\b', 'ScopedSigninLogs')
   $prefix = @(
     'let ScopedSigninLogs = SigninLogs',

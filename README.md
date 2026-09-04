@@ -62,10 +62,12 @@ The lifecycle intentionally fails closed:
 - Microsoft Entra ID P2 for `EntraIdSignInEvents` and the applicable Defender
   products/connectors for `UrlClickEvents` and `CloudAppEvents`.
 
-The Microsoft Graph Bicep extension is still documented by Microsoft as
-preview. Review its current support terms before using it outside a disposable
-lab tenant:
-https://learn.microsoft.com/graph/templates/bicep/reference/overview
+The Microsoft Graph Bicep v1.0 extension pinned in `infra/bicepconfig.json`
+has been generally available since July 2025 and requires Bicep 0.36.1 or
+newer. This does not change the support boundary of separate beta Graph APIs.
+Review the current Microsoft APIs terms of use before using it outside a
+disposable lab tenant:
+https://learn.microsoft.com/graph/templates/bicep/whats-new
 
 ## What is included
 
