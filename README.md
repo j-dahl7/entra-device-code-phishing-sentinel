@@ -86,10 +86,20 @@ https://learn.microsoft.com/graph/templates/bicep/whats-new
 - `50199 -> 0` is a correlation signal, not proof of device-code phishing.
   Join it with protocol, immutable app ID, non-empty correlation/session
   context, URL-click timing, or post-token behavior.
-- Application display names are attacker-controlled. The default allowlist uses
-  only the well-known Azure CLI and Azure PowerShell application IDs.
-- Teams Rooms and other legitimate clients are not suppressed by display name.
-  Inventory the exact application IDs in your tenant before adding exceptions.
+- Application display names are attacker-controlled. Azure CLI and Azure
+  PowerShell are public clients, not default detection exceptions. Rule 1 keeps
+  every matching 50199-to-success correlation regardless of application ID.
+- Rule 2 starts with an empty `ApprovedDeviceCodeContexts` table. A reviewed
+  exception must match an exact application ID, immutable user object ID, and
+  source IP together. App IDs alone, UPNs, and display names never suppress a row.
+  Even a matching tuple stays visible when risk is present or unavailable:
+  suppression requires both recorded risk levels to be `none` and a cleared
+  risk state. Low/medium/high, hidden, missing, and unknown risk remain visible.
+- Inventory legitimate clients and expected workflows before adding those
+  exceptions. Shared egress and a familiar user/client tuple are not proof of
+  safety; keep exceptions narrow, review device/tenant context separately, and
+  use Conditional Access to constrain allowed device-code workflows. Neither
+  rule establishes compromise from this correlation alone.
 - Microsoft Authentication Broker is not a default exception. Require a
   documented broker/device-registration use case and compensating controls.
 - The Sentinel joins prefer `UserId` and fall back to normalized UPN only when
@@ -110,7 +120,7 @@ https://learn.microsoft.com/graph/templates/bicep/whats-new
 | File | Purpose |
 |---|---|
 | `kql/sentinel/01-device-code-50199-to-success.kql` | Non-empty user/correlation join from 50199 to success |
-| `kql/sentinel/02-unapproved-device-code-client.kql` | Device-code-like events outside an immutable app-ID allowlist |
+| `kql/sentinel/02-unapproved-device-code-client.kql` | Unapproved exact app/user/IP contexts, plus approved contexts with risk or unavailable risk data |
 | `kql/sentinel/05-device-code-inventory.kql` | 30-day client inventory for tuning |
 
 ### Defender XDR
@@ -170,7 +180,7 @@ local proof that permits an owned rerun and partial-cleanup recovery. Do not
 copy it to another subscription, tenant, resource group, or workspace.
 
 After validating `SigninLogs` availability, running both KQL files manually,
-and tuning immutable app-ID exceptions, explicitly enable the rules:
+and tuning exact app/user/IP context exceptions, explicitly enable the rules:
 
 ```powershell
 ./scripts/manage-sentinel-rules.ps1 -EnableRules -Execute -Confirm
@@ -368,6 +378,18 @@ python -m unittest discover -s tests -v
 The repository workflow performs both Bicep builds, parses every PowerShell
 script, and runs the offline safety suite. The suite has no third-party Python
 dependency.
+
+The client-context fixtures exercise expected decision boundaries and bind them
+to the tracked query clauses: familiar CLI/PowerShell clients remain visible,
+app-only or display-name matches cannot suppress events, and an exact approved
+tuple cannot suppress elevated or unavailable risk. These offline fixtures do
+not execute KQL in Sentinel or establish live detection results. The original
+April tenant evidence remains historical and does not validate the new query
+revision. Consult the [SigninLogs schema](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/tables/signinlogs)
+for risk-field availability (`hidden` can reflect missing Identity Protection
+licensing) and Microsoft's [device-code Conditional Access guidance](https://learn.microsoft.com/en-us/entra/identity/conditional-access/policy-block-authentication-flows)
+before enabling either rule. Rule names/IDs and disabled deployment defaults
+remain unchanged for lifecycle ownership compatibility.
 
 ## Troubleshooting
 

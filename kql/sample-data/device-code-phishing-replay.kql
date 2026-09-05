@@ -5,11 +5,8 @@ let SigninLogs = datatable(TimeGenerated:datetime, UserId:string, UserPrincipalN
     datetime(2026-04-25T14:45:22Z), "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "casey@contoso.com", "0", "Success", "corr-002", "sess-002", "198.51.100.8", "Microsoft Azure CLI", "04b07795-8ddb-461a-bbee-02f9e1bf7b46", "AzureCLI", "deviceCode"
 ];
 let Window = 5m;
-// Only immutable application IDs suppress alerts. Display names are attacker-controlled.
-let ApprovedDeviceCodeAppIds = dynamic([
-    "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
-    "1950a258-227b-4e31-a9cf-717495945fc2"
-]);
+// No client-ID-only suppression, including Azure CLI and Azure PowerShell.
+// Display names are attacker-controlled. A familiar client does not make this correlation safe.
 let Interrupts =
     SigninLogs
     | where ResultType == "50199" or ResultDescription has "50199"
@@ -30,7 +27,6 @@ Interrupts
 | join kind=inner Successes on UserKey, CorrelationId
 | where SuccessTime between (InterruptTime .. InterruptTime + Window)
 | extend EffectiveAppId = iff(isnotempty(SuccessAppId), SuccessAppId, AppId)
-| where isempty(EffectiveAppId) or EffectiveAppId !in~ (ApprovedDeviceCodeAppIds)
 | project SuccessTime, InterruptTime, UserPrincipalName,
     AppDisplayName, AppId, SuccessApp, SuccessAppId, EffectiveAppId,
     IPAddress, SuccessIP, UserAgent, SuccessUserAgent,

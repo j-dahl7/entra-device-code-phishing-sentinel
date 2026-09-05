@@ -97,7 +97,7 @@ resource ruleUnapprovedDeviceCodeClient 'Microsoft.SecurityInsights/alertRules@2
   kind: 'Scheduled'
   properties: {
     displayName: 'LAB - Device Code - Unapproved Client'
-    description: 'Detects device-code authentication from application IDs outside the documented immutable-ID allowlist. Tune in a disabled state before explicitly enabling. ${ruleUnapprovedDeviceCodeClientOwner}'
+    description: 'Detects device-code-like events outside an explicitly reviewed app/user/IP context, and retains approved-context events with risk or unavailable risk data. No client-ID-only exceptions. Tune in a disabled state before explicitly enabling. ${ruleUnapprovedDeviceCodeClientOwner}'
     severity: 'Medium'
     enabled: enableRules
     query: loadTextContent('../kql/sentinel/02-unapproved-device-code-client.kql')
