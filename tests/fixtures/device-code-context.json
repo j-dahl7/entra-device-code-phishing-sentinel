@@ -1,0 +1,144 @@
+{
+  "description": "Synthetic expected policy decisions; no tenant identities or live evidence.",
+  "approved": [
+    {
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10"
+    }
+  ],
+  "cases": [
+    {
+      "name": "exact approved tuple with explicit clear risk",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": false
+    },
+    {
+      "name": "known CLI from unexpected IP",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.99",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "known CLI for unexpected immutable user",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "PowerShell has no default exception",
+      "app": "1950a258-227b-4e31-a9cf-717495945fc2",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "attacker-controlled CLI display name",
+      "displayName": "Microsoft Azure CLI",
+      "app": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "approved tuple with high risk",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "high",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "approved tuple with aggregated medium risk",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "medium",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "approved tuple with low risk",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "low",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "approved tuple with compromised state",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "confirmedCompromised",
+      "emit": true
+    },
+    {
+      "name": "approved tuple with hidden risk",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "hidden",
+      "aggregated": "hidden",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "approved tuple with missing risk",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "",
+      "aggregated": "",
+      "state": "",
+      "emit": true
+    },
+    {
+      "name": "blank immutable user never approved",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true
+    },
+    {
+      "name": "approved success cannot hide risky or unknown interrupt",
+      "app": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+      "user": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "ip": "192.0.2.10",
+      "during": "none",
+      "aggregated": "none",
+      "state": "none",
+      "emit": true,
+      "interruptClear": false
+    }
+  ]
+}

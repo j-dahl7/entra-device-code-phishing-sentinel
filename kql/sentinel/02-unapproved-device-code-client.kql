@@ -1,27 +1,37 @@
-// Only immutable application IDs suppress alerts. Display names are attacker-controlled.
-let ApprovedDeviceCodeAppIds = dynamic([
-    "04b07795-8ddb-461a-bbee-02f9e1bf7b46", // Microsoft Azure CLI
-    "1950a258-227b-4e31-a9cf-717495945fc2"  // Microsoft Azure PowerShell
-]);
+// No default exceptions, including Azure CLI and Azure PowerShell.
+// Display names are attacker-controlled. Add only reviewed exact app/user/IP tuples.
+let ApprovedDeviceCodeContexts = datatable(ApprovedAppId:string, ApprovedUserId:string, ApprovedIPAddress:string)[];
+let ApprovedContexts = ApprovedDeviceCodeContexts
+    | where isnotempty(ApprovedAppId) and isnotempty(ApprovedUserId) and isnotempty(ApprovedIPAddress)
+    | project ApprovedAppId=tolower(ApprovedAppId), ApprovedUserId=tolower(ApprovedUserId), ApprovedIPAddress=tolower(ApprovedIPAddress)
+    | distinct ApprovedAppId, ApprovedUserId, ApprovedIPAddress;
 let Lookback = 1h;
 let Window = 5m;
+let ContextSigninLogs = SigninLogs
+    | extend ImmutableUserId = tolower(tostring(column_ifexists("UserId", ""))),
+        RiskDuring = tostring(column_ifexists("RiskLevelDuringSignIn", "")),
+        RiskAggregated = tostring(column_ifexists("RiskLevelAggregated", "")),
+        RecordedRiskState = tostring(column_ifexists("RiskState", ""))
+    // Missing/hidden risk is not a no-risk observation and must remain visible.
+    | extend RiskContextClear = RiskDuring =~ "none" and RiskAggregated =~ "none"
+        and RecordedRiskState in~ ("none", "confirmedSafe", "remediated", "dismissed");
 let DirectDeviceCodeEvents =
-    SigninLogs
+    ContextSigninLogs
     | where TimeGenerated > ago(Lookback)
     | extend AuthProtocol = tostring(column_ifexists("AuthenticationProtocol", ""))
     | where AuthProtocol =~ "deviceCode" or ResultDescription has "device code"
-    | project TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName, AppId;
+    | project TimeGenerated, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 let Interrupts =
-    SigninLogs
+    ContextSigninLogs
     | where TimeGenerated > ago(Lookback)
     | extend Result = tostring(ResultType)
     | where Result == "50199" or ResultDescription has "50199"
     | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
     | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
     | where isnotempty(UserKey) and isnotempty(CorrelationId)
-    | project InterruptTime = TimeGenerated, UserKey, CorrelationId;
+    | project InterruptTime = TimeGenerated, UserKey, CorrelationId, InterruptRiskContextClear = RiskContextClear;
 let CorrelatedSuccesses =
-    SigninLogs
+    ContextSigninLogs
     | where TimeGenerated > ago(Lookback)
     | extend Result = tostring(ResultType)
     | where Result == "0"
@@ -29,20 +39,25 @@ let CorrelatedSuccesses =
     | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
     | where isnotempty(UserKey) and isnotempty(CorrelationId)
     | project SuccessTime = TimeGenerated, UserKey, UserPrincipalName,
-        CorrelationId, IPAddress, AppDisplayName, AppId;
+        CorrelationId, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 let DeviceCodeLikeEvents =
     Interrupts
     | join kind=inner CorrelatedSuccesses on UserKey, CorrelationId
     | where SuccessTime between (InterruptTime .. InterruptTime + Window)
+    | extend RiskContextClear = RiskContextClear and InterruptRiskContextClear
     | project TimeGenerated = SuccessTime, UserPrincipalName,
-        IPAddress, AppDisplayName, AppId;
+        ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 union DirectDeviceCodeEvents, DeviceCodeLikeEvents
-| distinct TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName, AppId
-| where isempty(AppId) or AppId !in~ (ApprovedDeviceCodeAppIds)
+| distinct TimeGenerated, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear
+| extend NormalizedAppId=tolower(AppId), NormalizedIPAddress=tolower(IPAddress)
+| join kind=leftouter ApprovedContexts on $left.NormalizedAppId == $right.ApprovedAppId,
+    $left.ImmutableUserId == $right.ApprovedUserId, $left.NormalizedIPAddress == $right.ApprovedIPAddress
+| where isempty(ApprovedAppId) or not(RiskContextClear)
+| extend ContextReason=iff(isempty(ApprovedAppId), "Unapproved app/user/IP context", "Approved context with risk or unavailable risk data")
 | summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
     Attempts=count(), Users=dcount(UserPrincipalName), IPs=dcount(IPAddress),
-    SampleUsers=make_set(UserPrincipalName, 10), SampleIPs=make_set(IPAddress, 10)
+    SampleUsers=make_set(UserPrincipalName, 10), SampleIPs=make_set(IPAddress, 10), ContextReasons=make_set(ContextReason, 10)
     by AppDisplayName, AppId
 | project TimeGenerated = LastSeen, FirstSeen, LastSeen,
-    AppDisplayName, AppId, Attempts, Users, IPs, SampleUsers, SampleIPs
+    AppDisplayName, AppId, Attempts, Users, IPs, SampleUsers, SampleIPs, ContextReasons
 | order by Attempts desc

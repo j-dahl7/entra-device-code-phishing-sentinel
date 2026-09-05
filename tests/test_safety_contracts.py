@@ -103,7 +103,7 @@ class StaticSafetyContractTests(unittest.TestCase):
             source = read(path)
             with self.subTest(path=path.name):
                 self.assertNotIn("ApprovedDeviceCodeApps", source)
-                self.assertIn("ApprovedDeviceCodeAppIds", source)
+                self.assertNotIn("ApprovedDeviceCodeAppIds", source)
                 self.assertIn("Display names are attacker-controlled", source)
 
     def test_url_click_hunt_matches_complete_url_paths_as_substrings(self):
