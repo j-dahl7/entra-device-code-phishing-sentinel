@@ -1,0 +1,12 @@
+[
+  {"name":"documented UPN and target GUID","objectId":"alice@example.com","target":[{}, {"ID":"11111111-2222-4333-8444-555555555555"}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":"11111111-2222-4333-8444-555555555555"},
+  {"name":"target wins over another GUID-shaped ObjectId","objectId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","target":[{}, {"ID":"11111111-2222-4333-8444-555555555555"}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":"11111111-2222-4333-8444-555555555555"},
+  {"name":"UPN is never cast to user GUID","objectId":"alice@example.com","target":[{}, {"ID":"alice@example.com"}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":null},
+  {"name":"missing target","objectId":"11111111-2222-4333-8444-555555555555","target":[],"action":"Add registered owner to device.","service":"Device Registration Service","expected":null},
+  {"name":"missing ID","objectId":"alice@example.com","target":[{}, {}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":null},
+  {"name":"malformed suffix","objectId":"alice@example.com","target":[{}, {"ID":"11111111-2222-4333-8444-555555555555/other"}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":null},
+  {"name":"nil GUID","objectId":"alice@example.com","target":[{}, {"ID":"00000000-0000-0000-0000-000000000000"}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":null},
+  {"name":"other action","objectId":"alice@example.com","target":[{}, {"ID":"11111111-2222-4333-8444-555555555555"}],"action":"Add device.","service":"Device Registration Service","expected":null},
+  {"name":"other service","objectId":"alice@example.com","target":[{}, {"ID":"11111111-2222-4333-8444-555555555555"}],"action":"Add registered owner to device.","service":"Other service","expected":null},
+  {"name":"uppercase GUID","objectId":"alice@example.com","target":[{}, {"ID":"AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"}],"action":"Add registered owner to device.","service":"Device Registration Service","expected":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}
+]
