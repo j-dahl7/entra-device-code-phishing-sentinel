@@ -33,11 +33,14 @@ param(
   [string]$UniqueName = $env:DEVICE_CODE_LAB_UNIQUE_NAME,
 
   [Parameter(Mandatory = $false)]
-  [switch]$Execute
+  [switch]$Execute,
+
+  [switch]$ResumePartial
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'AzureCli.ps1')
 
 $ownerTag = 'NineLives.Owner:EntraDeviceCodePhishingSentinel:v1'
 $expectedApplicationTags = @()
@@ -80,42 +83,6 @@ function Assert-LabUniqueName {
   return $Value
 }
 
-function Invoke-AzCli {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $output = & az @Arguments 2>&1
-  $exitCode = $LASTEXITCODE
-  $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
-
-  if ($exitCode -ne 0) {
-    throw ('Azure CLI failed (az {0}): {1}' -f ($Arguments -join ' '), $text)
-  }
-
-  return $text
-}
-
-function Invoke-AzCliJson {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $text = Invoke-AzCli -Arguments $Arguments
-  if ([string]::IsNullOrWhiteSpace($text)) {
-    throw ('Azure CLI returned an empty JSON response (az {0}).' -f ($Arguments -join ' '))
-  }
-
-  try {
-    return $text | ConvertFrom-Json
-  }
-  catch {
-    throw ('Azure CLI returned invalid JSON (az {0}): {1}' -f ($Arguments -join ' '), $_.Exception.Message)
-  }
-}
-
 function New-GraphUrl {
   param(
     [Parameter(Mandatory = $true)]
@@ -151,7 +118,7 @@ function Get-GraphObjectById {
   )
 
   $url = New-GraphUrl -Collection $Collection -ObjectId $ObjectId -Select $Select
-  return Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $url, '--only-show-errors', '-o', 'json')
+  return Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $url, '--only-show-errors', '-o', 'json') -NotFoundIsNull:$ResumePartial
 }
 
 function Assert-ExactId {
@@ -233,6 +200,21 @@ if (-not $activeTenantId.Equals($TenantId, [System.StringComparison]::OrdinalIgn
 $application = Get-GraphObjectById -Collection 'applications' -ObjectId $AppObjectId -Select $applicationSelect
 $servicePrincipal = Get-GraphObjectById -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId -Select $servicePrincipalSelect
 
+# A missing recorded ID alone is not enough: the same client must also be
+# absent by its alternate key. Any conflict, authorization or transport error
+# aborts before deletion. Resume is explicit and never adopts a replacement.
+foreach ($entry in @(
+  @{ Collection='applications'; Object=$application },
+  @{ Collection='servicePrincipals'; Object=$servicePrincipal }
+)) {
+  if ($null -eq $entry.Object) {
+    $url = "https://graph.microsoft.com/v1.0/{0}(appId='{1}')" -f $entry.Collection, $ClientId
+    $replacement = Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $url, '--only-show-errors', '-o', 'json') -NotFoundIsNull
+    if ($null -ne $replacement) { throw 'Client still resolves to an object after its recorded ID was absent; refusing cleanup.' }
+  }
+}
+
+if ($application) {
 Assert-ExactId -Kind 'application object' -Expected $AppObjectId -Actual ([string]$application.id)
 Assert-ExactId -Kind 'application client' -Expected $ClientId -Actual ([string]$application.appId)
 Assert-OwnershipTags -Kind 'application' -Object $application
@@ -246,14 +228,17 @@ if ($application.signInAudience -ne 'AzureADMyOrg') {
 if ($application.isFallbackPublicClient -ne $true) {
   throw ('Refusing cleanup: application {0} is not marked as the lab public client.' -f $AppObjectId)
 }
-$redirectUris = @($application.publicClient.redirectUris)
-if ($redirectUris.Count -ne 1 -or $redirectUris[0] -cne 'http://localhost') {
-  throw ('Refusing cleanup: application {0} does not have the exact lab public-client redirect URI.' -f $AppObjectId)
+$redirectUris = @($application.publicClient.redirectUris | Where-Object { $null -ne $_ })
+if ($redirectUris.Count -gt 0 -and ($redirectUris.Count -ne 1 -or $redirectUris[0] -cne 'http://localhost')) {
+  throw ('Refusing cleanup: application {0} contains an unexpected public-client redirect URI.' -f $AppObjectId)
 }
 if (@($application.passwordCredentials).Count -ne 0 -or @($application.keyCredentials).Count -ne 0) {
   throw ('Refusing cleanup: application {0} contains credentials that the lab template never creates.' -f $AppObjectId)
 }
 
+}
+
+if ($servicePrincipal) {
 Assert-ExactId -Kind 'service principal object' -Expected $ServicePrincipalObjectId -Actual ([string]$servicePrincipal.id)
 Assert-ExactId -Kind 'service principal client' -Expected $ClientId -Actual ([string]$servicePrincipal.appId)
 Assert-OwnershipTags -Kind 'service principal' -Object $servicePrincipal
@@ -266,6 +251,8 @@ if ($servicePrincipal.appOwnerOrganizationId) {
   if (-not $ownerTenantId.Equals($TenantId, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw ('Refusing cleanup: service principal {0} belongs to application tenant {1}, not {2}.' -f $ServicePrincipalObjectId, $ownerTenantId, $TenantId)
   }
+}
+
 }
 
 Write-Host ''
@@ -290,9 +277,13 @@ if (-not $PSCmdlet.ShouldProcess($target, 'Delete the two exact owner-marked Mic
 
 # Delete the exact service principal first. A failure is fatal and leaves the
 # application registration untouched for a safe retry or manual investigation.
-Remove-GraphObjectById -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId
-Write-Host ('Deleted exact service principal object {0}.' -f $ServicePrincipalObjectId)
+if ($servicePrincipal) {
+  Remove-GraphObjectById -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId
+  Write-Host ('Deleted exact service principal object {0}.' -f $ServicePrincipalObjectId)
+} else { Write-Host 'Recorded service principal is already absent.' }
 
-Remove-GraphObjectById -Collection 'applications' -ObjectId $AppObjectId
-Write-Host ('Deleted exact application object {0}.' -f $AppObjectId)
+if ($application) {
+  Remove-GraphObjectById -Collection 'applications' -ObjectId $AppObjectId
+  Write-Host ('Deleted exact application object {0}.' -f $AppObjectId)
+} else { Write-Host 'Recorded application is already absent.' }
 Write-Host 'Cleanup completed. No user object was touched.' -ForegroundColor Green

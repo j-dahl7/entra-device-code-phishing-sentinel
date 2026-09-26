@@ -7,7 +7,9 @@ let ApprovedContexts = ApprovedDeviceCodeContexts
     | distinct ApprovedAppId, ApprovedUserId, ApprovedIPAddress;
 let Lookback = 1h;
 let Window = 5m;
+let Freshness = 15m;
 let ContextSigninLogs = SigninLogs
+    | extend EventIngested = coalesce(ingestion_time(), TimeGenerated)
     | extend ImmutableUserId = tolower(tostring(column_ifexists("UserId", ""))),
         RiskDuring = tostring(column_ifexists("RiskLevelDuringSignIn", "")),
         RiskAggregated = tostring(column_ifexists("RiskLevelAggregated", "")),
@@ -20,7 +22,7 @@ let DirectDeviceCodeEvents =
     | where TimeGenerated > ago(Lookback)
     | extend AuthProtocol = tostring(column_ifexists("AuthenticationProtocol", ""))
     | where AuthProtocol =~ "deviceCode" or ResultDescription has "device code"
-    | project TimeGenerated, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
+    | project TimeGenerated, EventIngested, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 let Interrupts =
     ContextSigninLogs
     | where TimeGenerated > ago(Lookback)
@@ -29,7 +31,7 @@ let Interrupts =
     | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
     | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
     | where isnotempty(UserKey) and isnotempty(CorrelationId)
-    | project InterruptTime = TimeGenerated, UserKey, CorrelationId, InterruptRiskContextClear = RiskContextClear;
+    | project InterruptTime = TimeGenerated, InterruptIngested = EventIngested, UserKey, CorrelationId, InterruptRiskContextClear = RiskContextClear;
 let CorrelatedSuccesses =
     ContextSigninLogs
     | where TimeGenerated > ago(Lookback)
@@ -38,26 +40,33 @@ let CorrelatedSuccesses =
     | extend UserKey = tolower(tostring(column_ifexists("UserId", "")))
     | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
     | where isnotempty(UserKey) and isnotempty(CorrelationId)
-    | project SuccessTime = TimeGenerated, UserKey, UserPrincipalName,
+    | project SuccessTime = TimeGenerated, EventIngested, UserKey, UserPrincipalName,
         CorrelationId, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 let DeviceCodeLikeEvents =
     Interrupts
     | join kind=inner CorrelatedSuccesses on UserKey, CorrelationId
     | where SuccessTime between (InterruptTime .. InterruptTime + Window)
-    | extend RiskContextClear = RiskContextClear and InterruptRiskContextClear
-    | project TimeGenerated = SuccessTime, UserPrincipalName,
+    | extend RiskContextClear = RiskContextClear and InterruptRiskContextClear,
+        EventIngested = max_of(EventIngested, InterruptIngested)
+    | project TimeGenerated = SuccessTime, EventIngested, UserPrincipalName,
         ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 union DirectDeviceCodeEvents, DeviceCodeLikeEvents
-| distinct TimeGenerated, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear
+// A success can enter both paths. A late interrupt must refresh that event,
+// not count it twice; any unclear/risky observation keeps the event visible.
+| summarize EventIngested=max(EventIngested), RiskClearFlag=min(toint(coalesce(RiskContextClear, false)))
+    by TimeGenerated, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId
+| extend RiskContextClear = RiskClearFlag == 1
 | extend NormalizedAppId=tolower(AppId), NormalizedIPAddress=tolower(IPAddress)
 | join kind=leftouter ApprovedContexts on $left.NormalizedAppId == $right.ApprovedAppId,
     $left.ImmutableUserId == $right.ApprovedUserId, $left.NormalizedIPAddress == $right.ApprovedIPAddress
 | where isempty(ApprovedAppId) or not(RiskContextClear)
 | extend ContextReason=iff(isempty(ApprovedAppId), "Unapproved app/user/IP context", "Approved context with risk or unavailable risk data")
-| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated),
+| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), FreshestIngestion=max(EventIngested),
     Attempts=count(), Users=dcount(UserPrincipalName), IPs=dcount(IPAddress),
     SampleUsers=make_set(UserPrincipalName, 10), SampleIPs=make_set(IPAddress, 10), ContextReasons=make_set(ContextReason, 10)
-    by AppDisplayName, AppId
+    by AppDisplayName, AppId, UserPrincipalName, ImmutableUserId, IPAddress
+| where FreshestIngestion > ago(Freshness)
+| extend AccountName=tostring(split(UserPrincipalName, "@")[0]), AccountUPNSuffix=tostring(split(UserPrincipalName, "@")[1])
 | project TimeGenerated = LastSeen, FirstSeen, LastSeen,
-    AppDisplayName, AppId, Attempts, Users, IPs, SampleUsers, SampleIPs, ContextReasons
+    AppDisplayName, AppId, UserPrincipalName, ImmutableUserId, IPAddress, AccountName, AccountUPNSuffix, Attempts, Users, IPs, SampleUsers, SampleIPs, ContextReasons
 | order by Attempts desc

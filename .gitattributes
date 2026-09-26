@@ -1,0 +1,7 @@
+*.ps1 text eol=lf
+*.py text eol=lf
+*.kql text eol=lf
+*.bicep text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.json text eol=lf

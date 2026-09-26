@@ -6,7 +6,8 @@
 // resources by the lab scripts.
 //
 // Deploying Microsoft Graph Bicep resources requires Application.ReadWrite.All
-// or equivalent app-registration privileges for the deploying identity.
+// plus AppRoleAssignment.ReadWrite.All and appropriate directory privileges
+// for assigning the existing dedicated lab user.
 
 targetScope = 'subscription'
 
@@ -15,6 +16,11 @@ extension graphV1
 @sys.description('Immutable, deployment-specific Graph alternate key. Use the documented lab prefix plus a newly generated GUID and retain it for cleanup.')
 @minLength(60)
 param uniqueName string
+
+@sys.description('Object ID of the dedicated existing lab user to assign to this application. No user is created.')
+@minLength(36)
+@maxLength(36)
+param labUserObjectId string
 
 @sys.description('Display name shown in Entra sign-in logs and app registrations.')
 param displayName string = 'LAB - Nine Lives Device Code Telemetry'
@@ -40,17 +46,22 @@ resource app 'graphV1:Microsoft.Graph/applications@v1.0' = {
   signInAudience: 'AzureADMyOrg'
   isFallbackPublicClient: true
   publicClient: {
-    redirectUris: [
-      'http://localhost'
-    ]
+    redirectUris: []
   }
   tags: labTags
 }
 
 resource servicePrincipal 'graphV1:Microsoft.Graph/servicePrincipals@v1.0' = {
   appId: app.appId
+  appRoleAssignmentRequired: true
   notes: 'Owned by the Nine Lives Entra device-code phishing detection lab. No workload permissions are assigned by this template.'
   tags: labTags
+}
+
+resource labUserAssignment 'graphV1:Microsoft.Graph/appRoleAssignedTo@v1.0' = {
+  appRoleId: '00000000-0000-0000-0000-000000000000'
+  principalId: labUserObjectId
+  resourceId: servicePrincipal.id
 }
 
 output clientId string = app.appId

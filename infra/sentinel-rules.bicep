@@ -43,7 +43,7 @@ resource ruleDeviceCode50199ToSuccess 'Microsoft.SecurityInsights/alertRules@202
     triggerOperator: 'GreaterThan'
     triggerThreshold: 0
     suppressionDuration: 'PT1H'
-    suppressionEnabled: true
+    suppressionEnabled: false
     tactics: [
       'InitialAccess'
       'DefenseEvasion'
@@ -52,8 +52,17 @@ resource ruleDeviceCode50199ToSuccess 'Microsoft.SecurityInsights/alertRules@202
       'T1566.002'
       'T1550.001'
     ]
+    incidentConfiguration: {
+      createIncident: true
+      groupingConfiguration: {
+        enabled: true
+        reopenClosedIncident: false
+        lookbackDuration: 'PT1H'
+        matchingMethod: 'AllEntities'
+      }
+    }
     eventGroupingSettings: {
-      aggregationKind: 'SingleAlert'
+      aggregationKind: 'AlertPerResult'
     }
     entityMappings: [
       {
@@ -101,12 +110,12 @@ resource ruleUnapprovedDeviceCodeClient 'Microsoft.SecurityInsights/alertRules@2
     severity: 'Medium'
     enabled: enableRules
     query: loadTextContent('../kql/sentinel/02-unapproved-device-code-client.kql')
-    queryFrequency: 'PT1H'
+    queryFrequency: 'PT15M'
     queryPeriod: 'PT1H'
     triggerOperator: 'GreaterThan'
     triggerThreshold: 0
     suppressionDuration: 'PT6H'
-    suppressionEnabled: true
+    suppressionEnabled: false
     tactics: [
       'InitialAccess'
       'CredentialAccess'
@@ -115,10 +124,32 @@ resource ruleUnapprovedDeviceCodeClient 'Microsoft.SecurityInsights/alertRules@2
       'T1078'
       'T1550.001'
     ]
+    incidentConfiguration: {
+      createIncident: true
+      groupingConfiguration: {
+        enabled: true
+        reopenClosedIncident: false
+        lookbackDuration: 'PT1H'
+        matchingMethod: 'AllEntities'
+      }
+    }
     eventGroupingSettings: {
-      aggregationKind: 'SingleAlert'
+      aggregationKind: 'AlertPerResult'
     }
     entityMappings: [
+      {
+        entityType: 'Account'
+        fieldMappings: [
+          { identifier: 'Name', columnName: 'AccountName' }
+          { identifier: 'UPNSuffix', columnName: 'AccountUPNSuffix' }
+        ]
+      }
+      {
+        entityType: 'IP'
+        fieldMappings: [
+          { identifier: 'Address', columnName: 'IPAddress' }
+        ]
+      }
       {
         entityType: 'CloudApplication'
         fieldMappings: [
