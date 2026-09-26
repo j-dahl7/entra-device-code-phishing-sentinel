@@ -147,6 +147,25 @@ class ReviewRuntimeTests(unittest.TestCase):
 
 
 class DetectionTimingTests(unittest.TestCase):
+    def test_direct_and_correlated_success_merge_freshness_and_conservative_risk(self):
+        fixtures = [
+            ([{'event': 'same-success', 'ingested': 10, 'clear': True},
+              {'event': 'same-success', 'ingested': 20, 'clear': True}], 1, 20, True),
+            ([{'event': 'same-success', 'ingested': 10, 'clear': True},
+              {'event': 'same-success', 'ingested': 20, 'clear': False}], 1, 20, False),
+        ]
+        for observations, expected_count, expected_freshest, expected_clear in fixtures:
+            merged = {}
+            for item in observations:
+                state = merged.setdefault(item['event'], {'ingested': item['ingested'], 'clear': True})
+                state['ingested'] = max(state['ingested'], item['ingested'])
+                state['clear'] = state['clear'] and item['clear']
+            self.assertEqual(len(merged), expected_count)
+            self.assertEqual(merged['same-success'], {'ingested': expected_freshest, 'clear': expected_clear})
+        source = (ROOT/'kql/sentinel/02-unapproved-device-code-client.kql').read_text()
+        self.assertIn('EventIngested=max(EventIngested), RiskClearFlag=min(toint(coalesce(RiskContextClear, false)))', source)
+        self.assertNotIn('| distinct TimeGenerated, EventIngested', source)
+
     def test_fresh_pair_accepts_late_interrupt_without_global_pause(self):
         # Minutes before the evaluation: an old event can arrive recently.
         cases = [(29, 28, 2, 28, True), (10, 8, 10, 8, True),

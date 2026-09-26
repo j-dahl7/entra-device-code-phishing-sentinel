@@ -51,7 +51,11 @@ let DeviceCodeLikeEvents =
     | project TimeGenerated = SuccessTime, EventIngested, UserPrincipalName,
         ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear;
 union DirectDeviceCodeEvents, DeviceCodeLikeEvents
-| distinct TimeGenerated, EventIngested, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId, RiskContextClear
+// A success can enter both paths. A late interrupt must refresh that event,
+// not count it twice; any unclear/risky observation keeps the event visible.
+| summarize EventIngested=max(EventIngested), RiskClearFlag=min(toint(coalesce(RiskContextClear, false)))
+    by TimeGenerated, UserPrincipalName, ImmutableUserId, IPAddress, AppDisplayName, AppId
+| extend RiskContextClear = RiskClearFlag == 1
 | extend NormalizedAppId=tolower(AppId), NormalizedIPAddress=tolower(IPAddress)
 | join kind=leftouter ApprovedContexts on $left.NormalizedAppId == $right.ApprovedAppId,
     $left.ImmutableUserId == $right.ApprovedUserId, $left.NormalizedIPAddress == $right.ApprovedIPAddress
