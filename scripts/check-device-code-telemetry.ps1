@@ -37,6 +37,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'AzureCli.ps1')
 $ruleIds = @(
   '45543375-c81a-56ab-b020-b3cc3bcf652e',
   '0d879be9-2084-5bee-bf5b-8effbf4d8c64'
@@ -62,45 +63,12 @@ function Assert-GuidValue {
   return $parsed.ToString()
 }
 
-function Invoke-AzCli {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $output = & az @Arguments 2>&1
-  $exitCode = $LASTEXITCODE
-  $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-  if ($exitCode -ne 0) {
-    throw ('Azure CLI failed (az {0}): {1}' -f ($Arguments -join ' '), $text)
-  }
-  return $text
-}
-
-function Invoke-AzCliJson {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $text = Invoke-AzCli -Arguments $Arguments
-  if ([string]::IsNullOrWhiteSpace($text)) {
-    throw ('Azure CLI returned an empty JSON response (az {0}).' -f ($Arguments -join ' '))
-  }
-  try {
-    return $text | ConvertFrom-Json
-  }
-  catch {
-    throw ('Azure CLI returned invalid JSON (az {0}): {1}' -f ($Arguments -join ' '), $_.Exception.Message)
-  }
-}
-
 function Escape-KqlString {
   param(
     [Parameter(Mandatory = $true)]
     [string]$Value
   )
-  return $Value.Replace("'", "''")
+  return "@'" + $Value.Replace("'", "''") + "'"
 }
 
 function Invoke-LogAnalyticsTable {
@@ -115,6 +83,7 @@ function Invoke-LogAnalyticsTable {
     'monitor', 'log-analytics', 'query',
     '--workspace', $WorkspaceId,
     '--analytics-query', $Query,
+    '--timespan', ('PT{0}H' -f $LookbackHours),
     '--only-show-errors',
     '-o', 'table'
   )
@@ -155,30 +124,8 @@ function Get-ScopedRuleQuery {
 }
 
 function Get-AllIncidentPages {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$InitialUrl
-  )
-
-  $incidents = [System.Collections.Generic.List[object]]::new()
-  $nextUrl = $InitialUrl
-  while ($nextUrl) {
-    if (-not $nextUrl.StartsWith('https://management.azure.com/', [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw ('Sentinel returned an unexpected incident pagination URL: {0}' -f $nextUrl)
-    }
-    $page = Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $nextUrl, '--only-show-errors', '-o', 'json')
-    if (-not ($page.PSObject.Properties.Name -contains 'value')) {
-      throw 'Sentinel incident response did not contain a value array.'
-    }
-    foreach ($incident in @($page.value)) {
-      $incidents.Add($incident)
-    }
-    $nextUrl = $null
-    if ($page.PSObject.Properties.Name -contains 'nextLink' -and $page.nextLink) {
-      $nextUrl = [string]$page.nextLink
-    }
-  }
-  return @($incidents)
+  param([Parameter(Mandatory)][string]$InitialUrl)
+  return Get-VerifiedPagedValues -InitialUrl $InitialUrl
 }
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
@@ -190,17 +137,19 @@ $ClientId = Assert-GuidValue -Name 'ClientId' -Value $ClientId
 if ([string]::IsNullOrWhiteSpace($UserPrincipalName)) {
   throw 'UserPrincipalName is required. Set DEVICE_CODE_LAB_USER or pass the exact lab user UPN.'
 }
+if ($UserPrincipalName -notmatch '^[^\r\n]{3,320}$') { throw 'UserPrincipalName must contain 3-320 characters without newlines.' }
+if ($RunId -and $RunId -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$') { throw 'Invalid RunId.' }
 if (($ResourceGroup -and -not $WorkspaceName) -or ($WorkspaceName -and -not $ResourceGroup)) {
   throw 'ResourceGroup and WorkspaceName must be supplied together for exact incident lookup.'
 }
 
 $escapedClientId = Escape-KqlString -Value $ClientId
 $escapedUserPrincipalName = Escape-KqlString -Value $UserPrincipalName
-$identityPredicate = "(AppId == '$escapedClientId' and UserPrincipalName =~ '$escapedUserPrincipalName')"
+$identityPredicate = "(AppId == $escapedClientId and UserPrincipalName =~ $escapedUserPrincipalName)"
 $scopePredicate = $identityPredicate
 if ($RunId) {
-  $escapedRunId = Escape-KqlString -Value $RunId
-  $scopePredicate = "(UserAgent contains '$escapedRunId' or $identityPredicate)"
+  $escapedRunId = Escape-KqlString -Value ('NineLivesLab/1.0 (run:{0})' -f $RunId)
+  $scopePredicate = "(UserAgent contains_cs $escapedRunId or $identityPredicate)"
 }
 
 Write-Host ''
@@ -250,11 +199,12 @@ if ($ResourceGroup -and $WorkspaceName) {
   $encodedWorkspace = [System.Uri]::EscapeDataString($WorkspaceName)
   $incidentsUrl = 'https://management.azure.com/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.OperationalInsights/workspaces/{2}/providers/Microsoft.SecurityInsights/incidents?api-version=2024-09-01' -f $encodedSubscription, $encodedResourceGroup, $encodedWorkspace
   $incidentCutoff = (Get-Date).ToUniversalTime().AddHours(-1 * $LookbackHours)
+  $filter = [uri]::EscapeDataString(('properties/createdTimeUtc ge {0}' -f $incidentCutoff.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)))
+  $incidentsUrl += '&$filter=' + $filter + '&$orderby=properties%2FcreatedTimeUtc%20desc&$top=100'
   $incidents = @(Get-AllIncidentPages -InitialUrl $incidentsUrl)
   $matchingIncidents = @(
     $incidents | Where-Object {
-      $created = [datetime]::MinValue
-      $createdOk = [datetime]::TryParse([string]$_.properties.createdTimeUtc, [ref]$created)
+      $created = ConvertTo-UtcIncidentTime -Value $_.properties.createdTimeUtc
       $relatedIds = @($_.properties.relatedAnalyticRuleIds)
       $related = @($relatedIds | Where-Object {
         $candidate = [string]$_
@@ -262,7 +212,7 @@ if ($ResourceGroup -and $WorkspaceName) {
           $candidate.EndsWith(('/alertRules/{0}' -f $_), [System.StringComparison]::OrdinalIgnoreCase)
         }).Count -gt 0
       }).Count -gt 0
-      $createdOk -and $created.ToUniversalTime() -ge $incidentCutoff -and $related
+      $created -ge $incidentCutoff -and $related
     }
   )
 

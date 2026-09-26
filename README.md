@@ -44,11 +44,11 @@ The lifecycle intentionally fails closed:
 - No script deletes users. The template does not create a user, so it cannot
   prove ownership of one.
 - Native-command, REST, parsing, deployment, verification, and delete failures
-  are fatal. Expected OAuth polling states are the only retryable errors.
+  are fatal. Expected OAuth polling states are retryable; cleanup accepts a definitive already-absent Graph object only with explicit `-ResumePartial` and alternate-key verification.
 
 ## Prerequisites and permissions
 
-- PowerShell 7 or newer.
+- PowerShell 7 or newer. The shared transport invokes native Azure CLI with argument boundaries preserved; the Windows MSI installation must include its adjacent bundled `python.exe`.
 - Azure CLI, the Azure CLI `log-analytics` extension for the checker, and Bicep
   0.36.1 or newer.
 - A Sentinel-enabled Log Analytics workspace receiving Entra `SigninLogs`.
@@ -56,7 +56,7 @@ The lifecycle intentionally fails closed:
   resource group.
 - For the optional app, permission to create an application and service
   principal, such as `Application.ReadWrite.All` in a dedicated lab tenant,
-  plus permission to run an Azure subscription-scope deployment.
+  `AppRoleAssignment.ReadWrite.All` for the dedicated-user assignment and an appropriate directory role, plus permission to run an Azure subscription-scope deployment.
 - Azure CLI access to Microsoft Graph for exact object reads, the active-role
   safety check, and optional cleanup.
 - Microsoft Entra ID P2 for `EntraIdSignInEvents` and the applicable Defender
@@ -237,7 +237,7 @@ $deployment = az deployment sub create `
   --name $deploymentName `
   --location eastus `
   --template-file ./infra/lab-app.bicep `
-  --parameters uniqueName=$labUniqueName `
+  --parameters uniqueName=$labUniqueName labUserObjectId="<dedicated-existing-lab-user-object-guid>" `
   --only-show-errors `
   -o json | ConvertFrom-Json
 
@@ -261,8 +261,8 @@ owner tag and the deployment-specific `uniqueName` tag.
 The template creates:
 
 - one `AzureADMyOrg` application;
-- one public-client redirect URI (`http://localhost`);
-- one service principal; and
+- no public-client redirect URI (the device-code flow does not need one);
+- one service principal with assignment required, plus a default app-role assignment for the supplied dedicated lab user; and
 - no password credential, certificate credential, application permission,
   delegated API permission, or admin consent.
 
@@ -279,8 +279,7 @@ az login --tenant $env:AZURE_TENANT_ID
 The generator:
 
 1. verifies the active Azure CLI tenant and Graph user;
-2. blocks any active directory-role assignment unless the operator explicitly
-   uses `-SkipPrivilegedRoleCheck`;
+2. enumerates the current user's transitive group memberships, then checks active directory-role assignments for the user and those groups (including scoped/custom assignments); unreadable or incomplete responses fail closed unless the operator explicitly uses `-SkipPrivilegedRoleCheck` after independent administrator review;
 3. requests only `openid profile`;
 4. polls only through the expected `authorization_pending` and `slow_down`
    states;
@@ -288,8 +287,7 @@ The generator:
    the already verified Azure CLI lab user; and
 6. clears the token response without calling mail, Graph, or another workload.
 
-The active-role query cannot prove that the user has no inactive PIM
-eligibility. The post-issuance identity comparison also cannot stop a wrong
+The active-role preflight requires consented `RoleManagement.Read.Directory` plus the delegated caller privileges documented for [role assignment enumeration](https://learn.microsoft.com/en-us/graph/api/rbacapplication-list-roleassignments?view=graph-rest-1.0). Do not assign an admin role to the lab user just to make the check pass. If a normal lab user cannot enumerate, have an administrator independently review effective roles and use the explicit skip switch. The preflight cannot prove absence of inactive PIM eligibility, hidden-membership visibility gaps, or changes after enumeration. The post-issuance identity comparison also cannot stop a wrong
 person from entering the code; it makes that mismatch fatal and discards the
 response. Use a boring, dedicated lab account.
 
@@ -409,3 +407,13 @@ remain unchanged for lifecycle ownership compatibility.
   then the scoped query previews, then explicit rule enablement and scheduling.
 - **Defender hunt has no rows:** verify that the named product, license,
   connector, and table are present before treating an empty result as evidence.
+
+## Source review changes (September 2026)
+
+Both disabled-by-default Sentinel rules now run every 15 minutes without rule-wide suppression. Rule 1 retains its 30-minute correlation history and Rule 2 retains one hour; a 15-minute ingestion-freshness gate emits newly arrived evidence (falling back to event time when ingestion time is unavailable). The gate accepts a newly ingested side of a correlated pair, including an older interrupt arriving after its success, while still requiring the original event-time relationship. Events older than the source lookback remain outside the query. This is not an exactly-once guarantee; scheduler delays, reingestion and incident grouping require tenant validation. Per-result alerts and entity-based incident grouping replace global pauses; Rule 2 now returns app/user/IP groups and maps account and IP entities.
+
+The checker preserves the full scoped query and explicitly supplies its timespan. UPN values use KQL verbatim literals; the optional run fallback matches the complete `NineLivesLab/1.0 (run:<RunId>)` marker, including the closing delimiter. A raw short substring can no longer select unrelated user agents. It requests only recent incidents via the documented server filter/order, retains local UTC/rule-ID checks, and fails on changing continuation destinations, malformed collections, cycles or page/record limits instead of accepting incomplete output.
+
+Creating the optional app now needs `AppRoleAssignment.ReadWrite.All` and application read/write privileges plus an appropriate deploying directory role; see [Graph Bicep app-role assignment permissions](https://learn.microsoft.com/en-us/graph/templates/bicep/reference/approleassignedto?view=graph-bicep-1.0). The supplied user must already exist. No workload permission, user account, password or redirect URI is created. Assignment-required limits ordinary sign-ins to assigned users; it is not a defense against administrators changing the app, preexisting tokens or consent to other resources. Validate the desired sign-in experience in a disposable tenant before use.
+
+After a partial Graph deletion, explicitly rerun cleanup with `-ResumePartial` and the same immutable IDs. It accepts only a structured Graph 404/known absence code and also verifies absence by client ID. Authorization failures, transport errors or a replacement object fail before every delete. The surviving object still requires all ownership checks. Cleanup accepts the previous exact localhost redirect as a legacy shape, but no additional redirects. Deleting the service principal removes its app assignments; the existing lab user is never selected for deletion.

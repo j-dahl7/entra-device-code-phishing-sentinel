@@ -251,6 +251,12 @@ class PowerShellPreflightRuntimeTests(unittest.TestCase):
                           return
                         }}
                         if ($url -like '*servicePrincipals/{SP_OBJECT_ID}*') {{
+                          if ($env:MOCK_MODE -in @('graph-partial', 'graph-denied', 'graph-replacement')) {{
+                            $global:LASTEXITCODE = 1
+                            if ($env:MOCK_MODE -eq 'graph-denied') {{ 'ERROR: Forbidden({{"error":{{"code":"Authorization_RequestDenied"}}}})' }}
+                            else {{ 'ERROR: Not Found({{"error":{{"code":"Request_ResourceNotFound"}}}})' }}
+                            return
+                          }}
                           @{{
                             id = '{SP_OBJECT_ID}'
                             appId = '{CLIENT_ID}'
@@ -266,6 +272,14 @@ class PowerShellPreflightRuntimeTests(unittest.TestCase):
                             servicePrincipalType = 'Application'
                             appOwnerOrganizationId = '{TENANT_ID}'
                           }} | ConvertTo-Json -Compress -Depth 5
+                          return
+                        }}
+                        if ($url -like '*servicePrincipals(appId=*') {{
+                          if ($env:MOCK_MODE -eq 'graph-replacement') {{ '{{"id":"replacement"}}' }}
+                          else {{
+                            $global:LASTEXITCODE = 1
+                            'ERROR: Not Found({{"error":{{"code":"Request_ResourceNotFound"}}}})'
+                          }}
                           return
                         }}
                       }}
@@ -387,6 +401,25 @@ class PowerShellPreflightRuntimeTests(unittest.TestCase):
         self.assertEqual(len(delete_calls), 2)
         self.assertIn(f"servicePrincipals/{SP_OBJECT_ID}", delete_calls[0])
         self.assertIn(f"applications/{APP_OBJECT_ID}", delete_calls[1])
+
+    def test_partial_cleanup_requires_explicit_resume_and_definitive_absence(self):
+        arguments = ['-TenantId', f"'{TENANT_ID}'", '-ClientId', f"'{CLIENT_ID}'",
+                     '-AppObjectId', f"'{APP_OBJECT_ID}'", '-ServicePrincipalObjectId', f"'{SP_OBJECT_ID}'",
+                     '-UniqueName', f"'{UNIQUE_NAME}'", '-Execute', '-Confirm:$false']
+        failed, calls = self.run_script(SCRIPTS / 'cleanup-device-code-lab-artifacts.ps1', arguments, 'graph-partial')
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertNotIn(' DELETE ', calls)
+        for mode in ('graph-partial', 'graph-denied', 'graph-replacement'):
+            with self.subTest(mode=mode):
+                result, calls = self.run_script(SCRIPTS / 'cleanup-device-code-lab-artifacts.ps1', arguments + ['-ResumePartial'], mode)
+                deletes = [line for line in calls.splitlines() if ' DELETE ' in line]
+                if mode == 'graph-partial':
+                    self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                    self.assertEqual(len(deletes), 1)
+                    self.assertIn(f'applications/{APP_OBJECT_ID}', deletes[0])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(deletes, [])
 
 
 if __name__ == "__main__":

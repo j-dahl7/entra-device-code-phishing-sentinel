@@ -1,5 +1,6 @@
 let Lookback = 30m;
 let Window = 5m;
+let Freshness = 15m;
 // No client-ID-only suppression, including Azure CLI and Azure PowerShell.
 // Display names are attacker-controlled. A familiar client does not make this correlation safe.
 let Interrupts =
@@ -11,7 +12,8 @@ let Interrupts =
     | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
     | where isnotempty(UserKey) and isnotempty(CorrelationId)
     | extend SessionId = tostring(column_ifexists("SessionId", ""))
-    | project InterruptTime = TimeGenerated, UserKey, UserPrincipalName,
+    | extend InterruptIngested = coalesce(ingestion_time(), TimeGenerated)
+    | project InterruptTime = TimeGenerated, InterruptIngested, UserKey, UserPrincipalName,
         CorrelationId, SessionId, IPAddress, AppDisplayName, AppId, UserAgent;
 let Successes =
     SigninLogs
@@ -22,13 +24,16 @@ let Successes =
     | extend UserKey = iff(isempty(UserKey), tolower(UserPrincipalName), UserKey)
     | where isnotempty(UserKey) and isnotempty(CorrelationId)
     | extend SessionId = tostring(column_ifexists("SessionId", ""))
-    | project SuccessTime = TimeGenerated, UserKey, CorrelationId,
+    | extend SuccessIngested = coalesce(ingestion_time(), TimeGenerated)
+    | project SuccessTime = TimeGenerated, SuccessIngested, UserKey, CorrelationId,
         SuccessSessionId = SessionId, SuccessIP = IPAddress,
         SuccessApp = AppDisplayName, SuccessAppId = AppId,
         SuccessUserAgent = UserAgent;
 Interrupts
 | join kind=inner Successes on UserKey, CorrelationId
 | where SuccessTime between (InterruptTime .. InterruptTime + Window)
+// Preserve correlation history; only a newly ingested side emits this run.
+| where max_of(InterruptIngested, SuccessIngested) > ago(Freshness)
 | extend EffectiveAppId = iff(isnotempty(SuccessAppId), SuccessAppId, AppId)
 | extend AccountName = tostring(split(UserPrincipalName, "@")[0]),
     AccountUPNSuffix = tostring(split(UserPrincipalName, "@")[1])

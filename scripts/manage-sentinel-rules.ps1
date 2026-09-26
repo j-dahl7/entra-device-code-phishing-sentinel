@@ -39,6 +39,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'AzureCli.ps1')
 
 $apiVersion = '2024-03-01'
 $ownerMarker = 'nine-lives-zero-trust:entra-device-code-phishing-sentinel:v1'
@@ -88,39 +89,6 @@ function Assert-GuidValue {
   return $parsed.ToString()
 }
 
-function Invoke-AzCli {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $output = & az @Arguments 2>&1
-  $exitCode = $LASTEXITCODE
-  $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-  if ($exitCode -ne 0) {
-    throw ('Azure CLI failed (az {0}): {1}' -f ($Arguments -join ' '), $text)
-  }
-  return $text
-}
-
-function Invoke-AzCliJson {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $text = Invoke-AzCli -Arguments $Arguments
-  if ([string]::IsNullOrWhiteSpace($text)) {
-    throw ('Azure CLI returned an empty JSON response (az {0}).' -f ($Arguments -join ' '))
-  }
-  try {
-    return $text | ConvertFrom-Json
-  }
-  catch {
-    throw ('Azure CLI returned invalid JSON (az {0}): {1}' -f ($Arguments -join ' '), $_.Exception.Message)
-  }
-}
-
 function Get-OwnershipSuffix {
   param(
     [Parameter(Mandatory = $true)]
@@ -134,33 +102,8 @@ function Get-OwnershipSuffix {
 }
 
 function Get-AllSentinelRules {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$InitialUrl
-  )
-
-  $allRules = [System.Collections.Generic.List[object]]::new()
-  $nextUrl = $InitialUrl
-  while ($nextUrl) {
-    if (-not $nextUrl.StartsWith('https://management.azure.com/', [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw ('Sentinel returned an unexpected pagination URL: {0}' -f $nextUrl)
-    }
-
-    $page = Invoke-AzCliJson -Arguments @('rest', '--method', 'GET', '--url', $nextUrl, '--only-show-errors', '-o', 'json')
-    if (-not ($page.PSObject.Properties.Name -contains 'value')) {
-      throw 'Sentinel rule inventory response did not contain a value array.'
-    }
-    foreach ($rule in @($page.value)) {
-      $allRules.Add($rule)
-    }
-
-    $nextUrl = $null
-    if ($page.PSObject.Properties.Name -contains 'nextLink' -and $page.nextLink) {
-      $nextUrl = [string]$page.nextLink
-    }
-  }
-
-  return @($allRules)
+  param([Parameter(Mandatory)][string]$InitialUrl)
+  return Get-VerifiedPagedValues -InitialUrl $InitialUrl
 }
 
 function New-StateObject {

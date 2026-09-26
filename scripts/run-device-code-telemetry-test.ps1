@@ -39,6 +39,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'AzureCli.ps1')
 $fixedScope = 'openid profile'
 
 function Assert-GuidValue {
@@ -60,39 +61,6 @@ function Assert-GuidValue {
   return $parsed.ToString()
 }
 
-function Invoke-AzCli {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $output = & az @Arguments 2>&1
-  $exitCode = $LASTEXITCODE
-  $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-  if ($exitCode -ne 0) {
-    throw ('Azure CLI failed (az {0}): {1}' -f ($Arguments -join ' '), $text)
-  }
-  return $text
-}
-
-function Invoke-AzCliJson {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
-
-  $text = Invoke-AzCli -Arguments $Arguments
-  if ([string]::IsNullOrWhiteSpace($text)) {
-    throw ('Azure CLI returned an empty JSON response (az {0}).' -f ($Arguments -join ' '))
-  }
-  try {
-    return $text | ConvertFrom-Json
-  }
-  catch {
-    throw ('Azure CLI returned invalid JSON (az {0}): {1}' -f ($Arguments -join ' '), $_.Exception.Message)
-  }
-}
-
 function Get-CurrentGraphUser {
   return Invoke-AzCliJson -Arguments @(
     'rest',
@@ -104,34 +72,31 @@ function Get-CurrentGraphUser {
 }
 
 function Assert-NotPrivilegedAccount {
-  param(
-    [Parameter(Mandatory = $false)]
-    [switch]$Skip
-  )
-
+  param([Parameter(Mandatory)][string]$UserId, [switch]$Skip)
   if ($Skip) {
-    Write-Warning 'Skipping the active directory-role check by explicit request. Identity and tenant matching remain enforced.'
+    Write-Warning 'Skipping active-role enumeration by explicit request. Independently verify this dedicated account, including group/scoped roles and PIM eligibility. Identity matching remains enforced.'
     return
   }
-
-  $roleResponse = Invoke-AzCliJson -Arguments @(
-    'rest',
-    '--method', 'GET',
-    '--url', 'https://graph.microsoft.com/v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName',
-    '--only-show-errors',
-    '-o', 'json'
-  )
-  if (-not ($roleResponse.PSObject.Properties.Name -contains 'value')) {
-    throw 'Microsoft Graph role response did not contain a value array.'
+  # Stable roleAssignments covers scoped and custom active roles. Enumerate
+  # transitive group IDs too; directoryRole membership alone is insufficient.
+  $memberships = @(Get-VerifiedPagedValues -InitialUrl 'https://graph.microsoft.com/v1.0/me/transitiveMemberOf?$select=id' -NextLinkProperty '@odata.nextLink')
+  $principalIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $null = $principalIds.Add($UserId)
+  foreach ($membership in $memberships) {
+    $id = Assert-GuidValue -Name 'transitive membership ID' -Value ([string]$membership.id)
+    switch ([string]$membership.'@odata.type') {
+      '#microsoft.graph.directoryRole' { throw 'Refusing to run: an active directory role was returned.' }
+      '#microsoft.graph.group' { $null = $principalIds.Add($id) }
+      '#microsoft.graph.administrativeUnit' { }
+      default { throw 'Unknown transitive membership type; active-role preflight is incomplete.' }
+    }
   }
-
-  $assignedRoles = @(
-    $roleResponse.value |
-      Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.displayName) } |
-      ForEach-Object { $_.displayName }
-  )
-  if ($assignedRoles.Count -gt 0) {
-    throw ('Refusing to run with an account that has any active directory role. Detected: {0}.' -f ($assignedRoles -join ', '))
+  if ($principalIds.Count -gt 200) { throw 'Role preflight exceeded 200 principals; use independent administrator review.' }
+  foreach ($principalId in $principalIds) {
+    $filter = [uri]::EscapeDataString(("principalId eq '{0}'" -f $principalId))
+    $url = 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$filter=' + $filter + '&$select=id,principalId,roleDefinitionId,directoryScopeId'
+    $assignments = @(Get-VerifiedPagedValues -InitialUrl $url -NextLinkProperty '@odata.nextLink')
+    if ($assignments.Count -gt 0) { throw 'Refusing to run: an active direct, group, or scoped directory-role assignment was returned.' }
   }
 }
 
@@ -340,7 +305,7 @@ $null = Assert-GuidValue -Name 'Azure CLI user object ID' -Value ([string]$graph
 if ([string]::IsNullOrWhiteSpace([string]$graphUser.userPrincipalName)) {
   throw 'Microsoft Graph did not return a user principal name for the Azure CLI identity.'
 }
-Assert-NotPrivilegedAccount -Skip:$SkipPrivilegedRoleCheck
+Assert-NotPrivilegedAccount -UserId ([string]$graphUser.id) -Skip:$SkipPrivilegedRoleCheck
 
 $userAgent = 'NineLivesLab/1.0 (run:{0})' -f $RunId
 $deviceEndpoint = 'https://login.microsoftonline.com/{0}/oauth2/v2.0/devicecode' -f $TenantId
