@@ -27,16 +27,22 @@ let SuspiciousDeviceCodeSessions =
         by AccountObjectId, AccountUpn, SessionId;
 CloudAppEvents
 | where Timestamp > ago(24h)
-| where AccountDisplayName == "Device Registration Service"
-// Validate this tenant-specific raw-field mapping before operationalizing the hunt.
-| extend RegistrationUserObjectId = tolower(tostring(RawEventData.ObjectId))
-| where isnotempty(RegistrationUserObjectId)
+| where AccountDisplayName =~ "Device Registration Service"
+| where ActionType =~ "Add registered owner to device."
+// Microsoft's documented shape uses ObjectId for the UPN and Target[1].ID
+// for the registering user's Entra object ID. Other event shapes are not inferred.
+// Confirm this shape against retained tenant rows before operationalizing.
+// https://github.com/Azure/Azure-Sentinel/blob/master/Hunting%20Queries/Microsoft%20365%20Defender/Persistence/riskySignInToDeviceRegistration.yaml
+| extend RegistrationAccountUpn = tolower(tostring(RawEventData.ObjectId)),
+    RegistrationUserObjectId = tolower(tostring(RawEventData.Target[1].ID))
+| where RegistrationUserObjectId matches regex @"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+| where RegistrationUserObjectId != "00000000-0000-0000-0000-000000000000"
 | join kind=inner SuspiciousDeviceCodeSessions
     on $left.RegistrationUserObjectId == $right.AccountObjectId
 | where Timestamp between (DeviceCodeTime .. DeviceCodeTime + Window)
 | project Timestamp, DeviceCodeTime, FirstInterrupt,
     UserAccountObjectId = RegistrationUserObjectId,
-    AccountUpn, SessionId, ActionType, IPAddress,
+    AccountUpn, RegistrationAccountUpn, SessionId, ActionType, IPAddress,
     RegisteredObjectName = ObjectName, RegisteredObjectId = ObjectId,
     RawEventData
 | order by Timestamp desc

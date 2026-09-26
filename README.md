@@ -109,9 +109,20 @@ https://learn.microsoft.com/graph/templates/bicep/whats-new
   `CloudAppEvents.AccountId` is a UPN.
 - `UrlClickEvents` exposes an account UPN rather than an Entra object ID, so the
   URL-click hunt must retain a UPN join. Validate aliases and guest identities.
-- Device-registration raw fields vary by tenant and connector. Validate that
-  `RawEventData.ObjectId` is the registering user's Entra object ID before
+- Device-registration raw fields vary by tenant and connector. The hunt uses
+  Microsoft's documented `Add registered owner to device.` event shape:
+  `RawEventData.ObjectId` is the user UPN, while `RawEventData.Target[1].ID`
+  supplies the registering user's Entra object ID. It requires the exact action
+  and a nonempty, nonzero, complete GUID before the identity join. Other shapes
+  are not inferred. Validate the target array against retained tenant events before
   operationalizing that hunt.
+
+The registration mapping follows Microsoft's [published risky-sign-in/device-registration hunt](https://github.com/Azure/Azure-Sentinel/blob/master/Hunting%20Queries/Microsoft%20365%20Defender/Persistence/riskySignInToDeviceRegistration.yaml).
+The September 26 correction adds ten positive/negative event-shape fixtures
+and Microsoft Kusto.Language semantic analysis of the actual hunt alongside
+the two deployed rules. These checks validate the documented mapping and query
+syntax/types offline; they do not establish that every tenant emits that shape
+or that a new device registration was observed.
 
 ## Queries
 

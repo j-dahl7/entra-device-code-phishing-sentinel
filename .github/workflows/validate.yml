@@ -53,7 +53,7 @@ jobs:
       - name: Run offline safety tests
         run: python -m unittest discover -s tests -v
 
-      - name: Analyze deployed KQL against documented SigninLogs columns
+      - name: Analyze deployed rules and registration hunt against documented columns
         shell: pwsh
         run: |
           $directory = Join-Path $env:RUNNER_TEMP 'kusto-language-12.4.1'
