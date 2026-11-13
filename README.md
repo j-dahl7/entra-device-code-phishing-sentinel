@@ -354,10 +354,15 @@ credible provenance to an object it did not create.
 
 ## Suggested MITRE mapping
 
-| Rule | Severity | Techniques |
-|---|---|---|
-| 50199 followed by success | High | T1566.002, T1550.001 |
-| Unapproved device-code client | Medium | T1078, T1550.001 |
+| Rule | Severity | Techniques on the rule | Closest sub-techniques |
+|---|---|---|---|
+| 50199 followed by success | High | T1566, T1550 | T1566.002 (Spearphishing Link), T1550.001 (Application Access Token) |
+| Unapproved device-code client | Medium | T1078, T1550 | T1550.001 (Application Access Token) |
+
+The rules carry parent technique IDs. They are created with Sentinel API
+version 2024-03-01, which has no `subTechniques` property, and Sentinel has
+rejected a dotted ID in `techniques` with "The expected format is 'T####'".
+Use the sub-technique column when you map an incident by hand.
 
 ## Response checklist
 

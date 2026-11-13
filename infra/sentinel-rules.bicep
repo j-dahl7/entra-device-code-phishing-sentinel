@@ -48,9 +48,12 @@ resource ruleDeviceCode50199ToSuccess 'Microsoft.SecurityInsights/alertRules@202
       'InitialAccess'
       'DefenseEvasion'
     ]
+    // Parent technique IDs only. API version 2024-03-01 has no subTechniques
+    // property, and Sentinel has rejected dotted IDs in techniques. The README
+    // lists the closest sub-techniques.
     techniques: [
-      'T1566.002'
-      'T1550.001'
+      'T1566'
+      'T1550'
     ]
     incidentConfiguration: {
       createIncident: true
@@ -122,7 +125,7 @@ resource ruleUnapprovedDeviceCodeClient 'Microsoft.SecurityInsights/alertRules@2
     ]
     techniques: [
       'T1078'
-      'T1550.001'
+      'T1550'
     ]
     incidentConfiguration: {
       createIncident: true
