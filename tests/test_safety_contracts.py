@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +50,26 @@ class StaticSafetyContractTests(unittest.TestCase):
             "loadTextContent('../kql/sentinel/02-unapproved-device-code-client.kql')",
             source,
         )
+
+    def test_sentinel_rules_send_parent_technique_ids_on_the_stable_api(self):
+        source = read(INFRA / "sentinel-rules.bicep")
+        self.assertEqual(
+            source.count("'Microsoft.SecurityInsights/alertRules@2024-03-01'"), 2
+        )
+        # 2024-03-01 has no subTechniques property, and Sentinel rejects a
+        # dotted ID in techniques: "The expected format is 'T####'".
+        self.assertNotRegex(source, r"(?m)^\s*subTechniques\s*:")
+        blocks = re.findall(r"(?m)^\s*techniques:\s*\[(.*?)\]", source, re.DOTALL)
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            techniques = re.findall(r"'([^']+)'", block)
+            self.assertTrue(techniques)
+            for technique in techniques:
+                self.assertRegex(technique, r"^T\d{4}$")
+
+        readme = read(LAB_ROOT / "README.md")
+        self.assertIn("| 50199 followed by success | High | T1566, T1550 |", readme)
+        self.assertIn("| Unapproved device-code client | Medium | T1078, T1550 |", readme)
 
     def test_sentinel_lifecycle_refuses_adoption_and_requires_exact_state(self):
         source = read(SCRIPTS / "manage-sentinel-rules.ps1")
