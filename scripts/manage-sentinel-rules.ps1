@@ -1,4 +1,5 @@
 #requires -Version 7.0
+
 <#
 .SYNOPSIS
   Safely previews, deploys, or removes the lab's two Microsoft Sentinel rules.

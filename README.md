@@ -31,7 +31,8 @@ permission grant and its cleanup. It passed offline checks only: both Bicep
 templates compiled with Bicep 0.45.6 without diagnostics, every PowerShell
 entry point parsed under PowerShell 7, and the offline safety suite passed
 against mocked Microsoft Graph responses. The workflow's Kusto.Language
-analysis was not rerun for this revision, which changes no KQL. The grant was
+analysis passed in this revision's pull-request CI; it was not run locally,
+and this revision changes no KQL. The grant was
 not created in a tenant, the device-code sign-in was not repeated, and the new
 cleanup path did not run against Microsoft Graph. That the grant lets the lab
 user finish the sign-in is what Microsoft's documentation describes, not a

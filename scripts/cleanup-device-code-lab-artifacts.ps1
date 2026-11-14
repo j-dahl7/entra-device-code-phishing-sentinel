@@ -1,4 +1,5 @@
 #requires -Version 7.0
+
 <#
 .SYNOPSIS
   Preflights and removes the exact Entra application, service principal, and

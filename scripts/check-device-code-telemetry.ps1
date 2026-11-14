@@ -1,4 +1,5 @@
 #requires -Version 7.0
+
 <#
 .SYNOPSIS
   Checks Log Analytics and optional Sentinel incidents for one lab identity.
