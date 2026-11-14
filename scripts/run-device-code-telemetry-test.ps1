@@ -1,4 +1,5 @@
 #requires -Version 7.0
+
 <#
 .SYNOPSIS
   Generates Entra device-code sign-in telemetry for the signed-in lab user.
