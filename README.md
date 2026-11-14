@@ -26,6 +26,17 @@ No tenant object was created or deleted, no device code was approved, and no
 live Entra, Sentinel, Log Analytics, or Defender query was run during that
 validation.
 
+The November 13, 2026 revision adds the dedicated lab user's delegated
+permission grant and its cleanup. It passed offline checks only: both Bicep
+templates compiled with Bicep 0.45.6 without diagnostics, every PowerShell
+entry point parsed under PowerShell 7, and the offline safety suite passed
+against mocked Microsoft Graph responses. The workflow's Kusto.Language
+analysis was not rerun for this revision, which changes no KQL. The grant was
+not created in a tenant, the device-code sign-in was not repeated, and the new
+cleanup path did not run against Microsoft Graph. That the grant lets the lab
+user finish the sign-in is what Microsoft's documentation describes, not a
+result observed here.
+
 ## Safety model
 
 The lifecycle intentionally fails closed:
@@ -38,9 +49,15 @@ The lifecycle intentionally fails closed:
 - A different rule using either display name blocks all mutations.
 - Rules deploy disabled unless `-EnableRules` is explicitly supplied.
 - Entra cleanup requires tenant ID, client ID, application object ID, service
-  principal object ID, and the deployment-specific Graph `uniqueName`.
+  principal object ID, and the deployment-specific Graph `uniqueName`, plus the
+  delegated permission grant ID that the deployment returns.
 - Entra cleanup validates every object and ownership tag before the first
   delete. Display names are informational only.
+- The delegated grant carries no tags. Cleanup accepts it only by its exact ID
+  and only as the template creates it: the verified service principal as
+  client, `Principal` consent, Microsoft Graph as resource, and exactly
+  `openid profile`. Any other delegated grant on that service principal stops
+  cleanup.
 - No script deletes users. The template does not create a user, so it cannot
   prove ownership of one.
 - Native-command, REST, parsing, deployment, verification, and delete failures
@@ -56,9 +73,19 @@ The lifecycle intentionally fails closed:
   resource group.
 - For the optional app, permission to create an application and service
   principal, such as `Application.ReadWrite.All` in a dedicated lab tenant,
-  `AppRoleAssignment.ReadWrite.All` for the dedicated-user assignment and an appropriate directory role, plus permission to run an Azure subscription-scope deployment.
+  `AppRoleAssignment.ReadWrite.All` for the dedicated-user assignment,
+  `DelegatedPermissionGrant.ReadWrite.All` for that user's consent grant, and
+  an appropriate directory role, plus permission to run an Azure
+  subscription-scope deployment. Microsoft's
+  [single-user consent procedure](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-consent-single-user)
+  names Cloud Application Administrator, Application Administrator, or
+  Privileged Role Administrator.
 - Azure CLI access to Microsoft Graph for exact object reads, the active-role
-  safety check, and optional cleanup.
+  safety check, and optional cleanup. Cleanup deletes the consent grant, so the
+  signed-in administrator needs `DelegatedPermissionGrant.ReadWrite.All` and a
+  role that Microsoft lists for
+  [deleting a delegated permission grant](https://learn.microsoft.com/en-us/graph/api/oauth2permissiongrant-delete?view=graph-rest-1.0),
+  such as Cloud Application Administrator or Application Administrator.
 - Microsoft Entra ID P2 for `EntraIdSignInEvents` and the applicable Defender
   products/connectors for `UrlClickEvents` and `CloudAppEvents`.
 
@@ -74,7 +101,7 @@ https://learn.microsoft.com/graph/templates/bicep/whats-new
 | Surface | Files | Result |
 |---|---|---|
 | Sentinel | `infra/sentinel-rules.bicep` and `kql/sentinel/*.kql` | Two scheduled rules, disabled by default |
-| Entra | `infra/lab-app.bicep` | Optional single-tenant public client and service principal, with no credentials |
+| Entra | `infra/lab-app.bicep` | Optional single-tenant public client and service principal with no credentials, plus one `openid profile` consent grant for the dedicated lab user |
 | Telemetry | `scripts/run-device-code-telemetry-test.ps1` | One lab-user device-code ceremony; issued tokens are identity-checked and discarded |
 | Verification | `scripts/check-device-code-telemetry.ps1` | Exact app/user-scoped `SigninLogs` and rule previews |
 | Cleanup | `scripts/manage-sentinel-rules.ps1` and `scripts/cleanup-device-code-lab-artifacts.ps1` | Exact, owner-verified cleanup only |
@@ -261,21 +288,37 @@ $env:DEVICE_CODE_LAB_CLIENT_ID = $outputs.clientId.value
 $env:DEVICE_CODE_LAB_APP_OBJECT_ID = $outputs.applicationObjectId.value
 $env:DEVICE_CODE_LAB_SP_OBJECT_ID = $outputs.servicePrincipalId.value
 $env:DEVICE_CODE_LAB_UNIQUE_NAME = $outputs.uniqueName.value
+$env:DEVICE_CODE_LAB_GRANT_ID = $outputs.delegatedPermissionGrantId.value
 $env:AZURE_TENANT_ID = "<tenant-guid>"
 ```
 
-Retain the deployment name and those five values until cleanup is verified.
+Retain the deployment name and those six values until cleanup is verified.
 They are identifiers, not credentials, but they are required to prevent
 name-based selection. The template stamps both Graph objects with the fixed
-owner tag and the deployment-specific `uniqueName` tag.
+owner tag and the deployment-specific `uniqueName` tag. The consent grant
+cannot carry tags, so its recorded ID is the only handle cleanup accepts for
+it.
 
 The template creates:
 
 - one `AzureADMyOrg` application;
 - no public-client redirect URI (the device-code flow does not need one);
-- one service principal with assignment required, plus a default app-role assignment for the supplied dedicated lab user; and
+- one service principal with assignment required, plus a default app-role assignment for the supplied dedicated lab user;
+- one delegated permission grant for that same user only (`consentType` `Principal`),
+  covering `openid profile` on Microsoft Graph, the two scopes the generator
+  requests; and
 - no password credential, certificate credential, application permission,
-  delegated API permission, or admin consent.
+  tenant-wide (`AllPrincipals`) consent, or any other delegated scope.
+
+Microsoft Entra ID requires administrator consent for an application that
+requires user assignment, even where users may otherwise consent for
+themselves ([Configure how users consent to applications](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/configure-user-consent)).
+Without consent, the non-admin lab user is expected to stop at an
+admin-approval page and never finish the device-code sign-in. The grant follows
+Microsoft's procedure for [granting consent on behalf of a single user](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-consent-single-user):
+a `Principal` grant for one user plus the default app-role assignment. It is
+not tenant-wide consent, so no other user gains consent or assignment. This
+sign-in path has not been tested in a tenant; see the validation boundary.
 
 ### 3. Generate lab-owned telemetry
 
@@ -326,10 +369,22 @@ execution can lag, and disabled rules never create incidents.
 
 ## Remove the optional Entra app
 
+The dedicated lab user that ran the generator is not an administrator and does
+not own these objects. Sign Azure CLI back in as the deploying administrator
+before cleanup.
+
 The cleanup helper never searches by display name, UPN, or collection filter.
 It reads the exact object IDs, validates all fixed and deployment-specific
 tags, validates the app/client relationship, and rejects objects containing
 credentials the template never creates.
+
+The delegated grant is read by the exact `DEVICE_CODE_LAB_GRANT_ID` value. It
+must name the verified service principal as its client, be `Principal`
+consent, target Microsoft Graph, and carry exactly `openid profile`. The helper
+also reads that service principal's own delegated-grant list and stops if
+anything other than the recorded grant is attached. The list never supplies a
+deletion target. The dry run prints the grant's consented user object ID;
+confirm that it is the `labUserObjectId` you deployed before you execute.
 
 Preview:
 
@@ -343,9 +398,19 @@ Execute after reviewing every ID:
 ./scripts/cleanup-device-code-lab-artifacts.ps1 -Execute -Confirm
 ```
 
-The exact service principal is deleted first. If that delete fails, the
-application is left untouched. Any later failure is fatal and is reported
-without being converted into success.
+The exact delegated grant is deleted first, then the exact service principal,
+then the application. A failed delete is fatal, is reported without being
+converted into success, and leaves the later objects untouched. Microsoft Graph
+[stops issuing new tokens for a deleted grant](https://learn.microsoft.com/en-us/graph/api/oauth2permissiongrant-delete?view=graph-rest-1.0),
+while access tokens that were already issued stay valid until they expire. The
+generator discards the tokens it receives.
+
+A deployment made from a revision before November 13, 2026 has no grant and
+returned no grant ID. Leave `DEVICE_CODE_LAB_GRANT_ID` unset for it. Cleanup
+then requires that service principal to hold no delegated grant at all. If an
+administrator granted the lab user's `openid profile` consent by hand for such
+a deployment, supply that grant's exact ID instead. It must pass the same
+checks.
 
 User cleanup is deliberately outside this script. If you created a disposable
 user or Temporary Access Pass provisioner manually, review and remove it
@@ -371,7 +436,7 @@ Use the sub-technique column when you map an incident by hand.
 3. Review inbox rules, forwarding, delegates, transport rules, and mail access.
 4. Review new devices, OAuth grants, app consent, and authentication methods.
 5. Search finance, payroll, HR, file, and SaaS events after the sign-in.
-6. Convert verified false positives into immutable app-ID exceptions with an
+6. Record verified false positives as exact app/user/IP contexts with an
    owner, reason, and review date.
 
 ## Cost and licensing
@@ -411,6 +476,28 @@ remain unchanged for lifecycle ownership compatibility.
   `mcr.microsoft.com`.
 - **App deployment reports a `uniqueName` conflict:** stop. Generate a new
   GUID-suffixed value for a new lab deployment; do not adopt the existing app.
+- **App deployment fails on the consent grant:** the deploying identity lacks
+  `DelegatedPermissionGrant.ReadWrite.All` or a directory role that may create
+  delegated grants. Do not work around it with tenant-wide consent. The
+  application, service principal, and assignment can already exist, and a
+  failed deployment returns no outputs. Either fix the permission and rerun the
+  same command with the same `$labUniqueName` and lab user (Microsoft documents
+  that Graph Bicep matches the application by `uniqueName`, the service
+  principal by `appId`, and the assignment and grant by their property values;
+  see [uniquely named resources](https://learn.microsoft.com/en-us/graph/templates/bicep/concept-uniquely-named-resources)),
+  or read the client ID and both object IDs in the Microsoft Entra admin center
+  and run cleanup with the retained `uniqueName` and `DEVICE_CODE_LAB_GRANT_ID`
+  unset. Neither recovery path was tested here.
+- **Approval stops at an admin-approval page** (Microsoft documents
+  `AADSTS90094`, administrator consent is required): confirm that the approving
+  account's object ID is the `labUserObjectId` that was deployed and that the
+  deployment returned `delegatedPermissionGrantId`. Do not grant consent for
+  all users to get past it.
+- **Cleanup stops on a delegated grant:** the service principal holds consent
+  other than the recorded grant, for example a second grant left by
+  redeploying the same `uniqueName` for a different user, or the recorded grant
+  no longer has the shape the template creates. Review it before removing
+  anything by hand.
 - **Sentinel preflight reports an ID or display-name collision:** stop and
   inspect the foreign rule. Do not change the owned GUIDs to bypass the check.
 - **Provenance manifest is missing:** deploy can proceed only when neither rule
@@ -433,3 +520,13 @@ The checker preserves the full scoped query and explicitly supplies its timespan
 Creating the optional app now needs `AppRoleAssignment.ReadWrite.All` and application read/write privileges plus an appropriate deploying directory role; see [Graph Bicep app-role assignment permissions](https://learn.microsoft.com/en-us/graph/templates/bicep/reference/approleassignedto?view=graph-bicep-1.0). The supplied user must already exist. No workload permission, user account, password or redirect URI is created. Assignment-required limits ordinary sign-ins to assigned users; it is not a defense against administrators changing the app, preexisting tokens or consent to other resources. Validate the desired sign-in experience in a disposable tenant before use.
 
 After a partial Graph deletion, explicitly rerun cleanup with `-ResumePartial` and the same immutable IDs. It accepts only a structured Graph 404/known absence code and also verifies absence by client ID. Authorization failures, transport errors or a replacement object fail before every delete. The surviving object still requires all ownership checks. Cleanup accepts the previous exact localhost redirect as a legacy shape, but no additional redirects. Deleting the service principal removes its app assignments; the existing lab user is never selected for deletion.
+
+## Source review changes (November 2026)
+
+November 13, 2026, offline checks only. The optional app requires user assignment, and Microsoft Entra ID requires an administrator to consent to the permissions of such an app ([Configure how users consent to applications](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/configure-user-consent)). Earlier revisions granted no consent, so the non-admin lab user is expected to have stopped at an admin-approval page instead of consenting to the generator's `openid profile` request. The template now creates one `Principal` delegated grant for the supplied lab user, limited to `openid profile` on Microsoft Graph, and returns its ID as `delegatedPermissionGrantId`. Creating it needs `DelegatedPermissionGrant.ReadWrite.All`; see [Graph Bicep delegated permission grant permissions](https://learn.microsoft.com/en-us/graph/templates/bicep/reference/oauth2permissiongrants?view=graph-bicep-1.0). No tenant-wide consent and no other scope is granted.
+
+Cleanup takes the recorded grant ID, checks the grant against the verified service principal and the template's exact shape, refuses any other delegated grant on that service principal, and deletes the grant before the service principal and the application. `-ResumePartial` accepts an already-absent grant only when that service principal holds no other grant. Deployments from before this revision have no grant ID and can still be removed.
+
+The response checklist now records false positives as exact app/user/IP contexts, matching Rule 2, which never suppresses on an application ID alone.
+
+None of this was exercised in a tenant. No grant was created, no device code was approved, and cleanup ran only against mocked Microsoft Graph responses.

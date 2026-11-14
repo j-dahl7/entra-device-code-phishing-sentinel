@@ -1,16 +1,22 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-  Preflights and removes the exact Entra application and service principal
-  created by the device-code telemetry lab.
+  Preflights and removes the exact Entra application, service principal, and
+  delegated permission grant created by the device-code telemetry lab.
 
 .DESCRIPTION
   Cleanup requires the immutable tenant ID, client ID, application object ID,
   service-principal object ID, and deployment-specific uniqueName returned by
-  infra/lab-app.bicep. Every object and ownership marker is validated before
+  infra/lab-app.bicep, plus the delegated permission grant ID when the
+  deployment created one. Every object and ownership marker is validated before
   the first delete. The script never discovers a deletion target by display
   name and never deletes user objects, because the template does not create
   users.
+
+  The delegated grant carries no tags. It is accepted only by its exact ID,
+  with the owner-verified service principal as its client and the exact shape
+  the template creates. Any other delegated grant on that service principal
+  stops cleanup before the first delete.
 
   The default run is read-only. -Execute authorizes deletion, and PowerShell
   ShouldProcess still supports -WhatIf and -Confirm.
@@ -33,6 +39,9 @@ param(
   [string]$UniqueName = $env:DEVICE_CODE_LAB_UNIQUE_NAME,
 
   [Parameter(Mandatory = $false)]
+  [string]$PermissionGrantId = $env:DEVICE_CODE_LAB_GRANT_ID,
+
+  [Parameter(Mandatory = $false)]
   [switch]$Execute,
 
   [switch]$ResumePartial
@@ -46,6 +55,12 @@ $ownerTag = 'NineLives.Owner:EntraDeviceCodePhishingSentinel:v1'
 $expectedApplicationTags = @()
 $applicationSelect = 'id,appId,displayName,uniqueName,tags,signInAudience,isFallbackPublicClient,publicClient,passwordCredentials,keyCredentials'
 $servicePrincipalSelect = 'id,appId,displayName,tags,servicePrincipalType,appOwnerOrganizationId'
+# The only delegated grant infra/lab-app.bicep creates: Principal consent on
+# Microsoft Graph for the two scopes the telemetry generator requests.
+$permissionGrantSelect = 'id,clientId,consentType,principalId,resourceId,scope'
+$grantResourceSelect = 'id,appId'
+$microsoftGraphAppId = '00000003-0000-0000-c000-000000000000'
+$expectedGrantScopes = @('openid', 'profile')
 
 function Assert-GuidValue {
   param(
@@ -83,10 +98,24 @@ function Assert-LabUniqueName {
   return $Value
 }
 
+function Assert-PermissionGrantId {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$Value
+  )
+
+  # Microsoft Graph issues an opaque URL-safe identifier. It is compared
+  # exactly and never derived, parsed, or searched for.
+  if ($Value -cnotmatch '\A[A-Za-z0-9_-]{20,128}\z') {
+    throw 'PermissionGrantId must be the exact delegatedPermissionGrantId value returned by the lab deployment.'
+  }
+  return $Value
+}
+
 function New-GraphUrl {
   param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('applications', 'servicePrincipals')]
+    [ValidateSet('applications', 'servicePrincipals', 'oauth2PermissionGrants')]
     [string]$Collection,
 
     [Parameter(Mandatory = $true)]
@@ -107,7 +136,7 @@ function New-GraphUrl {
 function Get-GraphObjectById {
   param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('applications', 'servicePrincipals')]
+    [ValidateSet('applications', 'servicePrincipals', 'oauth2PermissionGrants')]
     [string]$Collection,
 
     [Parameter(Mandatory = $true)]
@@ -155,10 +184,59 @@ function Assert-OwnershipTags {
   }
 }
 
+function Get-ClientPermissionGrants {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ClientObjectId
+  )
+
+  # Exact-ID navigation on the owner-verified service principal, never a
+  # collection filter. It proves that nothing else is attached and never
+  # supplies a deletion target.
+  $url = '{0}/oauth2PermissionGrants' -f (New-GraphUrl -Collection 'servicePrincipals' -ObjectId $ClientObjectId)
+  return @(Get-VerifiedPagedValues -InitialUrl $url -NextLinkProperty '@odata.nextLink')
+}
+
+function Assert-LabPermissionGrant {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Grant
+  )
+
+  if ([string]$Grant.id -cne $PermissionGrantId) {
+    throw ('Delegated permission grant ID mismatch. Expected {0}; Microsoft Graph returned {1}.' -f $PermissionGrantId, $Grant.id)
+  }
+  Assert-ExactId -Kind 'delegated permission grant client' -Expected $ServicePrincipalObjectId -Actual ([string]$Grant.clientId)
+  if ([string]$Grant.consentType -cne 'Principal') {
+    throw ('Refusing cleanup: delegated permission grant {0} has consentType "{1}". The lab template only grants Principal consent.' -f $PermissionGrantId, $Grant.consentType)
+  }
+  $null = Assert-GuidValue -Name 'delegated permission grant principalId' -Value ([string]$Grant.principalId)
+
+  $actualScopes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  foreach ($scopeValue in (([string]$Grant.scope) -split '\s+')) {
+    if ($scopeValue) {
+      $null = $actualScopes.Add($scopeValue)
+    }
+  }
+  if (-not $actualScopes.SetEquals([string[]]$expectedGrantScopes)) {
+    throw ('Refusing cleanup: delegated permission grant {0} does not carry exactly the scopes "{1}" that the lab template grants.' -f $PermissionGrantId, ($expectedGrantScopes -join ' '))
+  }
+
+  $resourceObjectId = Assert-GuidValue -Name 'delegated permission grant resourceId' -Value ([string]$Grant.resourceId)
+  $resource = Get-GraphObjectById -Collection 'servicePrincipals' -ObjectId $resourceObjectId -Select $grantResourceSelect
+  if ($null -eq $resource) {
+    throw ('Refusing cleanup: the resource service principal of delegated permission grant {0} could not be read.' -f $PermissionGrantId)
+  }
+  Assert-ExactId -Kind 'delegated permission grant resource object' -Expected $resourceObjectId -Actual ([string]$resource.id)
+  if (-not ([string]$resource.appId).Equals($microsoftGraphAppId, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw ('Refusing cleanup: delegated permission grant {0} targets application {1}, not Microsoft Graph.' -f $PermissionGrantId, $resource.appId)
+  }
+}
+
 function Remove-GraphObjectById {
   param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('applications', 'servicePrincipals')]
+    [ValidateSet('applications', 'servicePrincipals', 'oauth2PermissionGrants')]
     [string]$Collection,
 
     [Parameter(Mandatory = $true)]
@@ -178,6 +256,14 @@ $ClientId = Assert-GuidValue -Name 'ClientId' -Value $ClientId
 $AppObjectId = Assert-GuidValue -Name 'AppObjectId' -Value $AppObjectId
 $ServicePrincipalObjectId = Assert-GuidValue -Name 'ServicePrincipalObjectId' -Value $ServicePrincipalObjectId
 $UniqueName = Assert-LabUniqueName -Value $UniqueName
+# A deployment made before the template granted consent has no grant ID. It is
+# accepted only when the service principal holds no delegated grant at all.
+if ([string]::IsNullOrWhiteSpace($PermissionGrantId)) {
+  $PermissionGrantId = ''
+}
+else {
+  $PermissionGrantId = Assert-PermissionGrantId -Value $PermissionGrantId
+}
 $expectedApplicationTags = @(
   $ownerTag
   ('NineLives.UniqueName:{0}' -f $UniqueName)
@@ -255,11 +341,51 @@ if ($servicePrincipal.appOwnerOrganizationId) {
 
 }
 
+# The delegated grant has no tags. Its ownership proof is the exact recorded ID
+# plus a client that is the owner-verified service principal. That service
+# principal's own grant list must then hold nothing else, so cleanup neither
+# strands nor silently removes consent that the template did not create.
+$permissionGrant = $null
+if ($PermissionGrantId) {
+  $permissionGrant = Get-GraphObjectById -Collection 'oauth2PermissionGrants' -ObjectId $PermissionGrantId -Select $permissionGrantSelect
+}
+if ($permissionGrant) {
+  if (-not $servicePrincipal) {
+    throw 'Refusing cleanup: the recorded delegated permission grant still resolves but its client service principal is absent, so ownership cannot be verified.'
+  }
+  Assert-LabPermissionGrant -Grant $permissionGrant
+}
+if ($servicePrincipal) {
+  $attachedGrantIds = @(Get-ClientPermissionGrants -ClientObjectId $ServicePrincipalObjectId | ForEach-Object { [string]$_.id })
+  $unexpectedGrantIds = @($attachedGrantIds | Where-Object { -not $permissionGrant -or $_ -cne $PermissionGrantId })
+  if ($unexpectedGrantIds.Count -gt 0) {
+    if (-not $PermissionGrantId) {
+      throw ('Refusing cleanup: service principal {0} holds a delegated permission grant but no PermissionGrantId was supplied. Supply the exact grant ID, which the lab deployment returns as delegatedPermissionGrantId.' -f $ServicePrincipalObjectId)
+    }
+    if (-not $permissionGrant) {
+      throw ('Refusing cleanup: service principal {0} still holds a delegated permission grant after the recorded grant ID was absent.' -f $ServicePrincipalObjectId)
+    }
+    throw ('Refusing cleanup: service principal {0} holds a delegated permission grant that the lab template never creates.' -f $ServicePrincipalObjectId)
+  }
+  if ($permissionGrant -and $attachedGrantIds.Count -ne 1) {
+    throw ('Refusing cleanup: service principal {0} did not list the recorded delegated permission grant exactly once. Microsoft Graph may still be replicating; no deletes were attempted.' -f $ServicePrincipalObjectId)
+  }
+}
+
 Write-Host ''
 Write-Host '=== Exact device-code lab cleanup plan ===' -ForegroundColor Cyan
 Write-Host ('Tenant:                   {0}' -f $TenantId)
 Write-Host ('Application:              displayName="{0}", clientId="{1}", objectId="{2}"' -f $application.displayName, $ClientId, $AppObjectId)
 Write-Host ('Service principal:        displayName="{0}", clientId="{1}", objectId="{2}"' -f $servicePrincipal.displayName, $ClientId, $ServicePrincipalObjectId)
+if ($permissionGrant) {
+  Write-Host ('Delegated grant:          id="{0}", consentType="{1}", scope="{2}", consented user object="{3}"' -f $PermissionGrantId, $permissionGrant.consentType, $permissionGrant.scope, $permissionGrant.principalId)
+}
+elseif ($PermissionGrantId) {
+  Write-Host ('Delegated grant:          id="{0}" is already absent' -f $PermissionGrantId)
+}
+else {
+  Write-Host 'Delegated grant:          none recorded for this deployment'
+}
 Write-Host ('Graph unique name:         {0}' -f $UniqueName)
 Write-Host ('Verified ownership marker: {0}' -f $ownerTag)
 Write-Host 'User objects:              never selected or deleted by this script'
@@ -270,12 +396,21 @@ if (-not $Execute) {
   return
 }
 
-$target = 'tenant {0}; servicePrincipal/{1}; applications/{2}' -f $TenantId, $ServicePrincipalObjectId, $AppObjectId
-if (-not $PSCmdlet.ShouldProcess($target, 'Delete the two exact owner-marked Microsoft Graph objects')) {
+$grantTarget = if ($PermissionGrantId) { $PermissionGrantId } else { 'none recorded' }
+$target = 'tenant {0}; oauth2PermissionGrants/{1}; servicePrincipal/{2}; applications/{3}' -f $TenantId, $grantTarget, $ServicePrincipalObjectId, $AppObjectId
+if (-not $PSCmdlet.ShouldProcess($target, 'Delete the exact lab delegated permission grant and the two exact owner-marked Microsoft Graph objects')) {
   return
 }
 
-# Delete the exact service principal first. A failure is fatal and leaves the
+# Delete the exact delegated grant first so the consent never depends on what
+# happens to the service principal afterwards. A failure is fatal and leaves
+# the service principal and the application registration untouched.
+if ($permissionGrant) {
+  Remove-GraphObjectById -Collection 'oauth2PermissionGrants' -ObjectId $PermissionGrantId
+  Write-Host ('Deleted exact delegated permission grant {0}.' -f $PermissionGrantId)
+} elseif ($PermissionGrantId) { Write-Host 'Recorded delegated permission grant is already absent.' }
+
+# Delete the exact service principal next. A failure is fatal and leaves the
 # application registration untouched for a safe retry or manual investigation.
 if ($servicePrincipal) {
   Remove-GraphObjectById -Collection 'servicePrincipals' -ObjectId $ServicePrincipalObjectId
